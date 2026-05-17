@@ -1,10 +1,9 @@
-name: 🌅 Morning Market Briefing
+name: Morning Market Briefing
 
 on:
   schedule:
-    # UTC 22:00 = KST 07:00 (월-금)
     - cron: '0 22 * * 1-5'
-  workflow_dispatch:   # 수동 실행 버튼 (테스트용)
+  workflow_dispatch:
 
 jobs:
   briefing:
@@ -15,25 +14,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 오늘 리포트 파일이 있으면 reports/ 폴더에 넣어두면 자동으로 읽힘 ──
-      # (선택) 외부 스토리지에서 다운로드하는 step을 여기에 추가 가능
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
 
       - name: Install dependencies
-        run: pip install google-genai yfinance requests
+        run: pip install groq yfinance requests
 
       - name: Run briefing
         env:
-          GEMINI_API_KEY:    ${{ secrets.GEMINI_API_KEY }}
-          TELEGRAM_TOKEN:    ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
-          # TradingEconomics API 키 (선택, 없어도 작동)
-          # TE_API_KEY:      ${{ secrets.TE_API_KEY }}
+          GROQ_API_KEY:     ${{ secrets.GROQ_API_KEY }}
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python briefing.py
 
       - name: Notify on failure
