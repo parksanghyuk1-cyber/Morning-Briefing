@@ -2,8 +2,8 @@ name: KRX Daily Closing Dashboard
 
 on:
   schedule:
-    # KST 15:30 = UTC 06:30
-    - cron: '30 6 * * 1-5'
+    - cron: '0 2 * * 1-5'   # KST 11:00 AM
+    - cron: '30 6 * * 1-5'  # KST 15:30 PM
   workflow_dispatch:
 
 jobs:
