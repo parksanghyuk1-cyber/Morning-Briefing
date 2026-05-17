@@ -162,8 +162,58 @@ SP500_SAMPLE = [
     "XOM","CVX","COP","LNG",
     "UNH","LLY","JNJ","PFE","MRNA",
     "CAT","BA","RTX","LMT","GE",
-    "COST","WMT","AMZN","TGT",
+    "COST","WMT","TGT","SBUX","NKE",
 ]
+
+# 기업 한줄 설명
+COMPANY_DESC = {
+    "NVDA":  "AI GPU 설계 1위",
+    "AAPL":  "아이폰/맥 제조",
+    "MSFT":  "클라우드/오피스",
+    "AMZN":  "이커머스/AWS",
+    "GOOGL": "구글 검색/유튜브",
+    "META":  "페이스북/인스타그램",
+    "TSLA":  "전기차/에너지",
+    "AVGO":  "반도체/네트워킹",
+    "TSM":   "파운드리(위탁생산)",
+    "AMD":   "CPU/GPU 설계",
+    "NFLX":  "스트리밍",
+    "CRM":   "기업용 CRM",
+    "ORCL":  "DB/클라우드",
+    "ADBE":  "크리에이티브 소프트웨어",
+    "QCOM":  "모바일 AP/통신칩",
+    "MU":    "DRAM/낸드플래시",
+    "INTC":  "CPU/파운드리",
+    "ARM":   "반도체 IP 설계",
+    "PLTR":  "AI 데이터 분석",
+    "SNOW":  "클라우드 데이터",
+    "JPM":   "미국 최대 은행",
+    "GS":    "투자은행",
+    "MS":    "투자은행/자산관리",
+    "BAC":   "상업은행",
+    "WFC":   "상업은행",
+    "V":     "글로벌 결제 네트워크",
+    "MA":    "글로벌 결제 네트워크",
+    "XOM":   "석유/가스 메이저",
+    "CVX":   "석유/가스 메이저",
+    "COP":   "독립 석유개발사",
+    "LNG":   "LNG 수출 터미널",
+    "UNH":   "미국 최대 보험사",
+    "LLY":   "비만/당뇨 신약",
+    "JNJ":   "제약/의료기기",
+    "PFE":   "글로벌 제약",
+    "MRNA":  "mRNA 백신/치료제",
+    "CAT":   "건설/광산 장비",
+    "BA":    "항공기 제조",
+    "RTX":   "방산/항공우주",
+    "LMT":   "방산 1위",
+    "GE":    "항공엔진",
+    "COST":  "창고형 할인마트",
+    "WMT":   "미국 최대 유통",
+    "TGT":   "미국 대형 유통",
+    "SBUX":  "글로벌 커피 체인",
+    "NKE":   "글로벌 스포츠웨어",
+}
 
 def get_featured_stocks():
     """등락률 상위/하위 + 거래량 급증 종목 추출"""
@@ -212,15 +262,20 @@ def get_groq_commentary(top, bottom, vol_top) -> str:
 하락 상위: {bottom_str}
 거래량 급증: {vol_str}
 
-각 종목에 대해 움직임의 이유를 아는 것만 간결하게 설명하세요.
+각 종목의 주가 움직임 이유를 구체적으로 설명하세요.
 
 규칙:
-- 이유를 모르는 종목은 이유를 쓰지 말 것
-- 모든 문장은 명사형으로 끝낼 것 (예: ~발표, ~상승, ~우려, ~기대감)
-- 종목당 1줄 이내
-- 추측이나 지어낸 내용 금지
+- 반드시 알고 있는 실제 이유만 작성 (추측/지어내기 금지)
+- 이유를 모르는 종목은 완전히 생략
+- 모든 문장은 명사형으로 끝낼 것
+  좋은 예: "블랙웰 GPU 출하량 상향 조정 소식에 따른 급등"
+  좋은 예: "분기 실적 EPS 컨센서스 15% 하회에 따른 급락"
+  나쁜 예: "실적 호조로 상승" (너무 모호)
+  나쁜 예: "시장 우려로 하락" (이유 없음)
+- 구체적 수치/이벤트/촉매(catalyst)를 반드시 포함
+- 종목당 1줄
 - 한국어로 작성
-- 형식: [티커] 한줄 설명"""
+- 형식: [티커] 구체적 설명"""
 
     try:
         client = Groq(api_key=os.environ["GROQ_API_KEY"])
@@ -294,11 +349,11 @@ def build_message():
     L.append("📂 *섹터 등락*")
     sectors = get_sectors()
     if sectors:
-        L.append("🏆 Top 3")
-        for name, c in sectors[:3]:
+        L.append("🏆 Top 5")
+        for name, c in sectors[:5]:
             L.append(f"  {'+' if c>=0 else ''}{c:.2f}%  {name}")
-        L.append("💀 Bottom 3")
-        for name, c in sectors[-3:]:
+        L.append("💀 Bottom 5")
+        for name, c in sectors[-5:]:
             L.append(f"  {c:.2f}%  {name}")
 
     # ── 빅테크 ──
@@ -322,15 +377,21 @@ def build_message():
     if top:
         L.append("🔺 상승")
         for t, c in top:
-            L.append(f"  {t} {'+' if c>=0 else ''}{c:.1f}%")
+            desc = COMPANY_DESC.get(t, "")
+            desc_str = f"  _{desc}_" if desc else ""
+            L.append(f"  *{t}* {'+' if c>=0 else ''}{c:.1f}%{desc_str}")
     if bottom:
         L.append("🔻 하락")
         for t, c in bottom:
-            L.append(f"  {t} {c:.1f}%")
+            desc = COMPANY_DESC.get(t, "")
+            desc_str = f"  _{desc}_" if desc else ""
+            L.append(f"  *{t}* {c:.1f}%{desc_str}")
     if vol_top:
         L.append("📈 거래량 급증")
         for t, c, r in vol_top:
-            L.append(f"  {t} {'+' if c>=0 else ''}{c:.1f}%  (평균 {r:.1f}배)")
+            desc = COMPANY_DESC.get(t, "")
+            desc_str = f"  _{desc}_" if desc else ""
+            L.append(f"  *{t}* {'+' if c>=0 else ''}{c:.1f}%  (평균 {r:.1f}배){desc_str}")
 
     # Groq 해설
     commentary = get_groq_commentary(top, bottom, vol_top)
