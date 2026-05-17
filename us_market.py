@@ -152,142 +152,81 @@ def get_bigtech():
 
 
 # ─────────────────────────────────────────
-# 5. 특징주 (수치 추출 + Groq 해설)
+# 5. 특징주 — Groq가 종목 선정 → yfinance로 수치 검증
 # ─────────────────────────────────────────
 
-SP500_SAMPLE = [
-    "NVDA","AAPL","MSFT","AMZN","GOOGL","META","TSLA","AVGO","TSM","AMD",
-    "NFLX","CRM","ORCL","ADBE","QCOM","MU","INTC","ARM","PLTR","SNOW",
-    "JPM","GS","MS","BAC","WFC","V","MA",
-    "XOM","CVX","COP","LNG",
-    "UNH","LLY","JNJ","PFE","MRNA",
-    "CAT","BA","RTX","LMT","GE",
-    "COST","WMT","TGT","SBUX","NKE",
+def groq_pick_tickers(kst_date: str) -> list[tuple[str, str]]:
+    """
+    Groq에게 오늘 날짜 기준 주목할 종목 선정 요청.
+    반환: [(ticker, 기업설명), ...]
+    """
+    prompt = f"""오늘은 {kst_date}입니다. 미국 증시 기준 어제 또는 최근 며칠간
+실적 발표, 가이던스 변경, 대형 뉴스, 급등락, 거래량 급증 등으로
+주목받은 종목을 골라주세요.
+
+반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트 절대 금지:
+[
+  {{"ticker": "NVDA", "name": "엔비디아", "desc": "AI GPU 설계", "reason": "블랙웰 수요 급증으로 실적 가이던스 상향"}},
+  {{"ticker": "INTC", "name": "인텔", "desc": "CPU/파운드리", "reason": "파운드리 사업부 분기 손실 지속으로 투자심리 악화"}}
 ]
 
-# 기업 한줄 설명
-COMPANY_DESC = {
-    "NVDA":  "AI GPU 설계 1위",
-    "AAPL":  "아이폰/맥 제조",
-    "MSFT":  "클라우드/오피스",
-    "AMZN":  "이커머스/AWS",
-    "GOOGL": "구글 검색/유튜브",
-    "META":  "페이스북/인스타그램",
-    "TSLA":  "전기차/에너지",
-    "AVGO":  "반도체/네트워킹",
-    "TSM":   "파운드리(위탁생산)",
-    "AMD":   "CPU/GPU 설계",
-    "NFLX":  "스트리밍",
-    "CRM":   "기업용 CRM",
-    "ORCL":  "DB/클라우드",
-    "ADBE":  "크리에이티브 소프트웨어",
-    "QCOM":  "모바일 AP/통신칩",
-    "MU":    "DRAM/낸드플래시",
-    "INTC":  "CPU/파운드리",
-    "ARM":   "반도체 IP 설계",
-    "PLTR":  "AI 데이터 분석",
-    "SNOW":  "클라우드 데이터",
-    "JPM":   "미국 최대 은행",
-    "GS":    "투자은행",
-    "MS":    "투자은행/자산관리",
-    "BAC":   "상업은행",
-    "WFC":   "상업은행",
-    "V":     "글로벌 결제 네트워크",
-    "MA":    "글로벌 결제 네트워크",
-    "XOM":   "석유/가스 메이저",
-    "CVX":   "석유/가스 메이저",
-    "COP":   "독립 석유개발사",
-    "LNG":   "LNG 수출 터미널",
-    "UNH":   "미국 최대 보험사",
-    "LLY":   "비만/당뇨 신약",
-    "JNJ":   "제약/의료기기",
-    "PFE":   "글로벌 제약",
-    "MRNA":  "mRNA 백신/치료제",
-    "CAT":   "건설/광산 장비",
-    "BA":    "항공기 제조",
-    "RTX":   "방산/항공우주",
-    "LMT":   "방산 1위",
-    "GE":    "항공엔진",
-    "COST":  "창고형 할인마트",
-    "WMT":   "미국 최대 유통",
-    "TGT":   "미국 대형 유통",
-    "SBUX":  "글로벌 커피 체인",
-    "NKE":   "글로벌 스포츠웨어",
-}
-
-def get_featured_stocks():
-    """등락률 상위/하위 + 거래량 급증 종목 추출"""
-    movers = []
-    vol_surges = []
-
-    for ticker in SP500_SAMPLE:
-        try:
-            hist = yf.Ticker(ticker).history(period="10d")
-            if len(hist) < 6:
-                continue
-
-            curr     = float(hist["Close"].iloc[-1])
-            prev     = float(hist["Close"].iloc[-2])
-            chg      = pct(curr, prev)
-            vol_today = float(hist["Volume"].iloc[-1])
-            vol_avg   = float(hist["Volume"].iloc[-6:-1].mean())
-
-            movers.append((ticker, chg))
-
-            if vol_avg > 0 and vol_today / vol_avg >= 2.5:
-                vol_surges.append((ticker, chg, vol_today / vol_avg))
-
-        except Exception:
-            continue
-
-    movers.sort(key=lambda x: x[1], reverse=True)
-    top    = movers[:5]
-    bottom = movers[-5:][::-1]
-
-    vol_surges.sort(key=lambda x: x[2], reverse=True)
-    vol_top = vol_surges[:4]
-
-    return top, bottom, vol_top
-
-
-def get_groq_commentary(top, bottom, vol_top) -> str:
-    """yfinance 수치를 주고 Groq에게 이유 해설 요청"""
-    top_str    = ", ".join([f"{t}({c:+.1f}%)" for t, c in top])
-    bottom_str = ", ".join([f"{t}({c:+.1f}%)" for t, c in bottom])
-    vol_str    = ", ".join([f"{t}({c:+.1f}%, 거래량 {r:.1f}배)" for t, c, r in vol_top])
-
-    prompt = f"""어제 미국 증시 특징주 데이터입니다.
-
-상승 상위: {top_str}
-하락 상위: {bottom_str}
-거래량 급증: {vol_str}
-
-각 종목의 주가 움직임 이유를 구체적으로 설명하세요.
-
 규칙:
-- 반드시 알고 있는 실제 이유만 작성 (추측/지어내기 금지)
-- 이유를 모르는 종목은 완전히 생략
-- 모든 문장은 명사형으로 끝낼 것
-  좋은 예: "블랙웰 GPU 출하량 상향 조정 소식에 따른 급등"
-  좋은 예: "분기 실적 EPS 컨센서스 15% 하회에 따른 급락"
-  나쁜 예: "실적 호조로 상승" (너무 모호)
-  나쁜 예: "시장 우려로 하락" (이유 없음)
-- 구체적 수치/이벤트/촉매(catalyst)를 반드시 포함
-- 종목당 1줄
-- 한국어로 작성
-- 형식: [티커] 구체적 설명"""
+- 종목 수: 7~10개 (상승/하락 혼합)
+- ticker는 미국 증시 실제 티커 심볼
+- reason은 구체적 수치/이벤트 포함, 명사형으로 끝낼 것
+- 확실히 아는 종목만 포함 (모르면 생략)
+- JSON 외 텍스트 절대 불가"""
 
     try:
         client = Groq(api_key=os.environ["GROQ_API_KEY"])
         msg = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=600,
-            temperature=0.2,
+            max_tokens=800,
+            temperature=0.1,
         )
-        return msg.choices[0].message.content.strip()
+        import json, re
+        raw = msg.choices[0].message.content.strip()
+        # JSON 배열 추출
+        match = re.search(r'\[.*\]', raw, re.DOTALL)
+        if not match:
+            return []
+        data = json.loads(match.group())
+        return [(d["ticker"], d.get("name",""), d.get("desc",""), d.get("reason","")) for d in data]
     except Exception:
-        return ""
+        return []
+
+
+def verify_with_yfinance(picks: list) -> list[dict]:
+    """
+    Groq가 선정한 종목을 yfinance로 실제 수치 검증.
+    수치 조회 실패 종목은 제외.
+    """
+    verified = []
+    for item in picks:
+        ticker, name, desc, reason = item
+        v, c = get_price(ticker)
+        if v is None:
+            continue
+        # 거래량 급증 여부
+        try:
+            hist = yf.Ticker(ticker).history(period="10d")
+            vol_today = float(hist["Volume"].iloc[-1])
+            vol_avg   = float(hist["Volume"].iloc[-6:-1].mean())
+            vol_ratio = vol_today / vol_avg if vol_avg > 0 else 1.0
+        except Exception:
+            vol_ratio = 1.0
+
+        verified.append({
+            "ticker":    ticker,
+            "name":      name,
+            "desc":      desc,
+            "reason":    reason,
+            "price":     v,
+            "chg":       c,
+            "vol_ratio": vol_ratio,
+        })
+    return verified
 
 
 # ─────────────────────────────────────────
@@ -372,35 +311,23 @@ def build_message():
     # ── 특징주 ──
     L.append("")
     L.append("⭐ *특징주*")
-    top, bottom, vol_top = get_featured_stocks()
+    kst_date = kst.strftime("%Y년 %m월 %d일")
+    picks    = groq_pick_tickers(kst_date)
+    stocks   = verify_with_yfinance(picks)
 
-    if top:
-        L.append("🔺 상승")
-        for t, c in top:
-            desc = COMPANY_DESC.get(t, "")
-            desc_str = f"  _{desc}_" if desc else ""
-            L.append(f"  *{t}* {'+' if c>=0 else ''}{c:.1f}%{desc_str}")
-    if bottom:
-        L.append("🔻 하락")
-        for t, c in bottom:
-            desc = COMPANY_DESC.get(t, "")
-            desc_str = f"  _{desc}_" if desc else ""
-            L.append(f"  *{t}* {c:.1f}%{desc_str}")
-    if vol_top:
-        L.append("📈 거래량 급증")
-        for t, c, r in vol_top:
-            desc = COMPANY_DESC.get(t, "")
-            desc_str = f"  _{desc}_" if desc else ""
-            L.append(f"  *{t}* {'+' if c>=0 else ''}{c:.1f}%  (평균 {r:.1f}배){desc_str}")
-
-    # Groq 해설
-    commentary = get_groq_commentary(top, bottom, vol_top)
-    if commentary:
-        L.append("")
-        L.append("💬 *특징주 해설*")
-        for line in commentary.split("\n"):
-            if line.strip():
-                L.append(f"  {line.strip()}")
+    if stocks:
+        for s in stocks:
+            arrow = "🔺" if s["chg"] >= 0 else "🔻"
+            vol_str = f"  _(거래량 {s['vol_ratio']:.1f}배)_" if s["vol_ratio"] >= 2.0 else ""
+            L.append(
+                f"{arrow} *{s['ticker']}* ({s['name']}) "
+                f"{'+' if s['chg']>=0 else ''}{s['chg']:.1f}%  "
+                f"_{s['desc']}_{vol_str}"
+            )
+            if s["reason"]:
+                L.append(f"   └ {s['reason']}")
+    else:
+        L.append("  데이터 수집 실패")
 
     # ── 심리 지표 ──
     L.append("")
