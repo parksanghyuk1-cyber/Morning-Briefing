@@ -1,0 +1,52 @@
+name: 🌅 Morning Market Briefing
+
+on:
+  schedule:
+    # UTC 22:00 = KST 07:00 (월-금)
+    - cron: '0 22 * * 1-5'
+  workflow_dispatch:   # 수동 실행 버튼 (테스트용)
+
+jobs:
+  briefing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 오늘 리포트 파일이 있으면 reports/ 폴더에 넣어두면 자동으로 읽힘 ──
+      # (선택) 외부 스토리지에서 다운로드하는 step을 여기에 추가 가능
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install \
+            yfinance \
+            anthropic \
+            requests
+
+      - name: Run briefing
+        env:
+          GEMINI_API_KEY:    ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_TOKEN:    ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+          # TradingEconomics API 키 (선택, 없어도 작동)
+          # TE_API_KEY:      ${{ secrets.TE_API_KEY }}
+        run: python briefing.py
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -s -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d text="⚠️ 아침 브리핑 실행 실패. GitHub Actions 로그를 확인해주세요."
