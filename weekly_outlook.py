@@ -1,11 +1,11 @@
 """
-weekly_outlook.py
-─────────────────
+weekly_outlook.py v2
+─────────────────────
 주간 글로벌 시장 전망 및 주요 일정
-- ForexFactory JSON API: 경제지표 캘린더 (작동 시)
-- yfinance: 직전주 시장 데이터
-- Groq: 전체 브리핑 생성 (캘린더 포함 fallback)
-매주 일요일 오후 6시 KST 자동 전송
+- yfinance: 직전주 실제 시장 데이터 (수치 기반 분석)
+- ForexFactory: 캘린더 (작동 시) / 실패 시 수치 없이 이름만
+- Groq: 전략 분석 (실제 데이터 기반, hallucination 방지)
+매주 일요일 오후 6시 KST
 """
 
 import os
@@ -21,11 +21,9 @@ from groq import Groq
 # ─────────────────────────────────────────
 
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
-
 COUNTRY_EMOJI = {
     "USD": "🇺🇸", "KRW": "🇰🇷", "CNY": "🇨🇳", "JPY": "🇯🇵",
     "EUR": "🇪🇺", "GBP": "🇬🇧", "AUD": "🇦🇺", "CAD": "🇨🇦",
-    "CHF": "🇨🇭", "NZD": "🇳🇿",
 }
 
 def next_week_range():
@@ -35,16 +33,76 @@ def next_week_range():
     fri = mon + datetime.timedelta(days=4)
     return mon, fri
 
-def fmt_date_kr(d: datetime.date) -> str:
+def fmt_date(d: datetime.date) -> str:
     return f"{d.month}월 {d.day}일 ({WEEKDAY_KR[d.weekday()]})"
 
 
 # ─────────────────────────────────────────
-# 1. 경제지표 캘린더 (ForexFactory)
+# 1. 실제 시장 데이터 수집 (분석 근거)
+# ─────────────────────────────────────────
+
+def get_market_data() -> dict:
+    """직전주 종가 기준 주요 지표 수집"""
+    tickers = {
+        "S&P500":    ("^GSPC",    0),
+        "나스닥":    ("^IXIC",    0),
+        "다우":      ("^DJI",     0),
+        "러셀2000":  ("^RUT",     0),
+        "VIX":       ("^VIX",     2),
+        "미국10년채": ("^TNX",    2),
+        "미국2년채":  ("^IRX",    2),
+        "달러인덱스": ("DX-Y.NYB", 2),
+        "원달러":    ("KRW=X",    2),
+        "달러엔":    ("JPY=X",    2),
+        "금":        ("GC=F",     0),
+        "WTI":       ("CL=F",     2),
+        "나스닥선물": ("NQ=F",    0),
+    }
+    result = {}
+    for name, (ticker, dec) in tickers.items():
+        try:
+            hist = yf.Ticker(ticker).history(period="15d")
+            if len(hist) < 2:
+                continue
+            curr  = float(hist["Close"].iloc[-1])
+            prev1 = float(hist["Close"].iloc[-2])   # 전일
+            prev5 = float(hist["Close"].iloc[-6]) if len(hist) >= 6 else float(hist["Close"].iloc[0])  # 주간
+            result[name] = {
+                "현재":   round(curr, dec),
+                "일간":   round((curr - prev1) / prev1 * 100, 2),
+                "주간":   round((curr - prev5) / prev5 * 100, 2),
+            }
+        except Exception:
+            pass
+    return result
+
+
+def format_market_for_prompt(data: dict) -> str:
+    """Groq에게 전달할 시장 데이터 텍스트"""
+    lines = []
+    groups = {
+        "📈 미국 증시": ["S&P500", "나스닥", "다우", "러셀2000"],
+        "😨 변동성/금리": ["VIX", "미국10년채", "미국2년채"],
+        "💵 환율/달러": ["달러인덱스", "원달러", "달러엔"],
+        "💢 원자재": ["금", "WTI"],
+    }
+    for group, keys in groups.items():
+        lines.append(group)
+        for k in keys:
+            d = data.get(k)
+            if d:
+                lines.append(
+                    f"  {k}: {d['현재']} "
+                    f"(일간 {d['일간']:+.2f}%, 주간 {d['주간']:+.2f}%)"
+                )
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────
+# 2. ForexFactory 캘린더
 # ─────────────────────────────────────────
 
 def fetch_ff_calendar() -> list[dict]:
-    """ForexFactory 다음주 캘린더. 실패 시 빈 리스트."""
     try:
         resp = requests.get(
             "https://nfs.faireconomy.media/ff_calendar_nextweek.json",
@@ -57,166 +115,148 @@ def fetch_ff_calendar() -> list[dict]:
         pass
     return []
 
-def parse_ff_calendar(raw: list[dict], mon: datetime.date) -> dict:
-    """날짜별로 High/Medium 이벤트 분류. {date_str: [events]}"""
+def parse_ff_calendar(raw: list, mon: datetime.date) -> dict:
     by_date = {}
     for i in range(5):
-        d = mon + datetime.timedelta(days=i)
-        by_date[d.isoformat()] = []
+        by_date[(mon + datetime.timedelta(days=i)).isoformat()] = []
 
     for ev in raw:
         try:
-            dt_str  = ev.get("date", "")
-            dt      = datetime.datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-            date_key = dt.date().isoformat()
-            if date_key not in by_date:
+            dt  = datetime.datetime.fromisoformat(ev["date"].replace("Z", "+00:00"))
+            key = dt.date().isoformat()
+            if key not in by_date:
                 continue
             if ev.get("impact") not in ("High", "Medium"):
                 continue
             country  = ev.get("country", "")
-            emoji    = COUNTRY_EMOJI.get(country, "🌐")
-            forecast = ev.get("forecast") or "-"
+            forecast = ev.get("forecast") or "미발표"
             previous = ev.get("previous") or "-"
-            by_date[date_key].append({
-                "emoji":    emoji,
-                "title":    ev.get("title", ""),
-                "impact":   ev.get("impact", ""),
-                "forecast": forecast,
-                "previous": previous,
-            })
+            stars    = "⭐⭐⭐" if ev["impact"] == "High" else "⭐⭐"
+            by_date[key].append(
+                f"{COUNTRY_EMOJI.get(country,'🌐')} {ev.get('title','')} {stars} "
+                f"(Consens: {forecast} / Prev: {previous})"
+            )
         except Exception:
             continue
     return by_date
 
 
 # ─────────────────────────────────────────
-# 2. 직전주 시장 데이터 (Groq 컨텍스트용)
+# 3. Groq 프롬프트 (핵심)
 # ─────────────────────────────────────────
 
-def get_market_context() -> str:
-    tickers = {
-        "S&P500":    "^GSPC",
-        "나스닥":    "^IXIC",
-        "다우":      "^DJI",
-        "VIX":       "^VIX",
-        "달러인덱스": "DX-Y.NYB",
-        "원달러":    "KRW=X",
-        "미국10년채": "^TNX",
-        "금":        "GC=F",
-        "WTI":       "CL=F",
-    }
-    lines = []
-    for name, ticker in tickers.items():
-        try:
-            hist = yf.Ticker(ticker).history(period="10d")
-            if len(hist) < 2:
-                continue
-            curr = float(hist["Close"].iloc[-1])
-            week_prev = float(hist["Close"].iloc[-6]) if len(hist) >= 6 else float(hist["Close"].iloc[0])
-            chg = (curr - week_prev) / week_prev * 100
-            lines.append(f"- {name}: {curr:.2f} (주간 {chg:+.2f}%)")
-        except Exception:
-            pass
-    return "\n".join(lines) if lines else "시장 데이터 수집 실패"
-
-
-# ─────────────────────────────────────────
-# 3. Groq로 주간 전망 생성
-# ─────────────────────────────────────────
-
-def build_groq_prompt(
+def build_prompt(
     mon: datetime.date,
     fri: datetime.date,
-    calendar_by_date: dict,
-    market_context: str,
+    market_data: dict,
+    calendar: dict,   # {date_str: [event_str, ...]}
     has_calendar: bool,
 ) -> str:
 
-    # 캘린더 데이터 텍스트화
-    calendar_text = ""
-    if has_calendar:
-        for i in range(5):
-            d = mon + datetime.timedelta(days=i)
-            key = d.isoformat()
-            events = calendar_by_date.get(key, [])
-            if events:
-                calendar_text += f"\n{fmt_date_kr(d)}:\n"
-                for ev in events:
-                    stars = "⭐⭐⭐" if ev["impact"] == "High" else "⭐⭐"
-                    calendar_text += f"  {ev['emoji']} {ev['title']} {stars} (예상: {ev['forecast']} / 이전: {ev['previous']})\n"
+    week_str    = f"{mon.year}년 {mon.month}월 {mon.day}일 ~ {fri.month}월 {fri.day}일"
+    market_text = format_market_for_prompt(market_data)
 
-    week_str = f"{mon.year}년 {mon.month}월 {mon.day}일 ~ {fri.month}월 {fri.day}일"
+    # 캘린더 섹션 구성
+    cal_lines = []
+    for i in range(5):
+        d   = mon + datetime.timedelta(days=i)
+        key = d.isoformat()
+        evs = calendar.get(key, []) if has_calendar else []
 
-    return f"""당신은 한국 VC/기관투자자를 위한 주간 글로벌 시장 브리핑을 작성하는 전문 애널리스트입니다.
+        cal_lines.append(f"📌 {fmt_date(d)}:")
+        cal_lines.append("  √ 경제 지표")
+        if evs:
+            for e in evs:
+                cal_lines.append(f"    - {e}")
+        else:
+            cal_lines.append("    - (데이터 없음)")
+        cal_lines.append("  √ 시장 휴장 / 주요 이벤트")
+        cal_lines.append("    - [아래 규칙에 따라 작성]")
+    cal_text = "\n".join(cal_lines)
 
-아래 정보를 바탕으로 [{week_str}] 주간 글로벌 시장 전망 및 주요 일정을 작성해주세요.
+    return f"""당신은 한국 기관투자자/VC 심사역을 위한 주간 글로벌 시장 브리핑을 작성하는 시니어 애널리스트입니다.
 
-=== 직전주 시장 데이터 ===
-{market_context}
+=== 직전주 실제 시장 데이터 (반드시 이 수치 사용) ===
+{market_text}
 
-=== 다음주 경제지표 일정 (ForexFactory 데이터) ===
-{calendar_text if has_calendar else "캘린더 데이터 수집 실패 - 주요 예정 지표를 AI가 직접 작성해주세요"}
+=== 다음주 경제지표 일정 ===
+{cal_text}
 
-=== 출력 형식 (반드시 준수) ===
+=== 작성 지시 ===
 
+아래 형식으로 [{week_str}] 주간 브리핑을 한국어로 작성하세요.
+
+**절대 금지 사항:**
+- 위에 제공된 시장 데이터 외에 수치를 임의로 지어내는 것
+- 경제지표의 Consensus/Previous 값을 모를 경우 추측해서 쓰는 것
+- "고려할 수 있다", "포함할 수 있다" 같은 공허한 표현
+- 구체성 없는 일반론적 조언
+
+**반드시 포함할 것:**
+- 실제 시장 데이터 수치를 인용한 구체적 분석
+- 현재 매크로 국면(금리/달러/VIX 수준)에 대한 명확한 해석
+- 한국 투자자 관점의 원달러/외국인 수급 시사점
+- 다음주 주목할 구체적 섹터나 이벤트
+
+**출력 형식:**
+
+---
 안녕하십니까 🤖 주간 시장 브리핑 봇입니다
 
 [{week_str}] 주간 글로벌 시장 전망 및 주요 일정입니다.
-[직전주 시장 흐름과 다음주 주요 변수를 2-3문장으로 요약]
+[직전주 핵심 시장 흐름을 실제 수치와 함께 2-3문장으로 요약. S&P500 주간 등락률, VIX 수준, 달러/금리 방향성 포함]
 
 ━━━━━━━━━━
 📅 요일별 상세 일정
 ━━━━━━━━━━
 
-[월요일부터 금요일까지 각 요일별로 아래 형식 반복]
-📌 [날짜] ([요일]): [해당일 핵심 이벤트 한줄 제목]
+[각 요일별 반복 - 월~금 5일]
+📌 [날짜] ([요일]): [핵심 이벤트 한줄 제목]
 √ 시장 휴장
-- [휴장 시장 목록, 없으면 (없음)]
+- [공휴일 있으면 표기, 없으면 (없음)]
 √ 경제 지표
-- [국가이모지] [지표명] (Consens: [예상치] / Prev: [이전치])
-  [지표가 없으면 (주요 지표 발표 없음)]
+- [제공된 데이터 있으면 그대로 사용. 없으면 "(주요 지표 발표 없음)" 표기. 수치 절대 지어내지 말것]
 √ 주요 뉴스 및 실적/이벤트
-- [주요 이벤트, 없으면 (없음)]
+- [실제 알려진 이벤트만 작성. 모르면 (없음)]
 
 ━━━━━━━━━━
 💡 투자 전략적 관점
 ━━━━━━━━━━
 📌 변동성 관리
-- [2-3개 불릿]
+- [VIX {market_data.get('VIX', {}).get('현재', 'N/A')} 수준의 구체적 의미와 대응 방향]
+- [금리/달러 현 레벨에서 포지션 관리 시사점]
 📌 섹터별 모멘텀
-- [2-3개 불릿, 구체적 섹터/종목 언급]
+- [직전주 시장 흐름에서 읽히는 구체적 섹터 방향성 - 반도체/AI/에너지 등 실제 맥락]
+- [한국 증시 관련 외국인 수급/환율 영향 해석]
 📌 매크로/환율 체크
-- [2-3개 불릿]
+- [원달러 {market_data.get('원달러', {}).get('현재', 'N/A')} 수준과 주간 변화의 시사점]
+- [미국10년채 {market_data.get('미국10년채', {}).get('현재', 'N/A')}% 기준 금리 국면 해석]
+- [다음주 주목할 매크로 이벤트]
+---
 
-=== 작성 규칙 ===
-- 한국어로 작성
-- 구체적 수치와 지표명 사용
-- 전문적이고 간결한 문체
-- 과도한 수식어 지양
-- 전체 길이: 텔레그램 기준 2000-2500자
+전체 길이: 1800~2500자 사이로 작성하세요.
 """
+
+
+# ─────────────────────────────────────────
+# 4. 생성 + 전송
+# ─────────────────────────────────────────
 
 def generate_with_groq(prompt: str) -> str:
     client = Groq(api_key=os.environ["GROQ_API_KEY"])
     msg = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=3000,
-        temperature=0.4,
+        max_tokens=3500,
+        temperature=0.3,   # 낮게 유지 → hallucination 감소
     )
     return msg.choices[0].message.content
 
 
-# ─────────────────────────────────────────
-# 4. Telegram 전송
-# ─────────────────────────────────────────
-
 def send_telegram(text: str):
     token   = os.environ["TELEGRAM_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
-    # 4000자씩 분할 전송
-    chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
-    for chunk in chunks:
+    for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
         resp = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
             json={"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown"},
@@ -238,17 +278,19 @@ def main():
     mon, fri = next_week_range()
     print(f"대상 주: {mon} ~ {fri}")
 
-    print("  → ForexFactory 캘린더 수집 중...")
-    raw_calendar = fetch_ff_calendar()
-    has_calendar = len(raw_calendar) > 0
-    calendar_by_date = parse_ff_calendar(raw_calendar, mon) if has_calendar else {}
-    print(f"  → 캘린더: {'수집 성공' if has_calendar else '실패 → Groq 직접 생성'}")
-
     print("  → 시장 데이터 수집 중...")
-    market_ctx = get_market_context()
+    market_data = get_market_data()
+    for k, v in market_data.items():
+        print(f"     {k}: {v}")
 
-    print("  → Groq 주간 전망 생성 중...")
-    prompt   = build_groq_prompt(mon, fri, calendar_by_date, market_ctx, has_calendar)
+    print("  → ForexFactory 캘린더 수집 중...")
+    raw_cal     = fetch_ff_calendar()
+    has_cal     = len(raw_cal) > 0
+    calendar    = parse_ff_calendar(raw_cal, mon) if has_cal else {}
+    print(f"     캘린더: {'✅ 수집 성공' if has_cal else '❌ 실패 → 수치 없이 진행'}")
+
+    print("  → Groq 브리핑 생성 중...")
+    prompt   = build_prompt(mon, fri, market_data, calendar, has_cal)
     briefing = generate_with_groq(prompt)
 
     print("  → Telegram 전송 중...")
