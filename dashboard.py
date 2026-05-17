@@ -54,7 +54,7 @@ def build_dashboard() -> str:
     v, c = get_price("^TNX")
     lines.append(f"🇺🇸 미국채 10년 (금리): {fmt(v, c, 2)}")
 
-    v, c = get_price("DX=F")
+    v, c = get_price("DX-Y.NYB")
     lines.append(f"💵 달러 인덱스 선물: {fmt(v, c, 2)}")
 
     # ── 주요 환율 ──────────────────────────
