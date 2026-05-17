@@ -25,11 +25,7 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: |
-          pip install \
-            yfinance \
-            anthropic \
-            requests
+        run: pip install google-generativeai yfinance requests
 
       - name: Run briefing
         env:
