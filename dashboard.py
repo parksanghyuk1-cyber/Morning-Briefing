@@ -1,32 +1,41 @@
 """
-dashboard.py v2
+dashboard.py v3
 ────────────────
 글로벌 매크로 대시보드
 - yfinance: 시장 데이터 (무료)
-- Groq: 전체 지표 기반 시장 평가 (무료)
+- Gemini 2.0 Flash: 경제지표 코멘트 (무료)
 매일 오전 7시 KST 텔레그램 전송
 """
 
 import os
+import math
 import datetime
 import requests
 import yfinance as yf
 
 
+# ─────────────────────────────────────────
+# 유틸
+# ─────────────────────────────────────────
+
 def get_price(ticker: str, period: str = "5d") -> tuple:
+    """(현재가, 등락률) 반환. NaN/실패 시 (None, None)"""
     try:
         hist = yf.Ticker(ticker).history(period=period)
         if len(hist) < 2:
             return None, None
-        prev = hist["Close"].iloc[-2]
-        curr = hist["Close"].iloc[-1]
-        return float(curr), float((curr - prev) / prev * 100)
+        prev = float(hist["Close"].iloc[-2])
+        curr = float(hist["Close"].iloc[-1])
+        # NaN 체크
+        if math.isnan(curr) or math.isnan(prev) or prev == 0:
+            return None, None
+        return curr, (curr - prev) / prev * 100
     except Exception:
         return None, None
 
 
 def fmt(value, chg, decimals=2, comma=True) -> str:
-    if value is None:
+    if value is None or math.isnan(value):
         return "N/A"
     arrow = "🔺" if chg >= 0 else "▼"
     sign  = "+" if chg >= 0 else ""
@@ -34,17 +43,22 @@ def fmt(value, chg, decimals=2, comma=True) -> str:
     return f"{num} ({sign}{chg:.2f}% {arrow})"
 
 
-# ─────────────────────────────────────────
-# Groq 시장 평가
-# ─────────────────────────────────────────
+def safe_line(label: str, v, c, decimals=2) -> tuple[str, str | None]:
+    """라인 문자열과 요약 문자열 반환. N/A면 라인은 숨김."""
+    if v is None:
+        return None, None  # 숨김
+    return f"{label}: {fmt(v, c, decimals)}", f"{label.split()[-1]}: {v:.2f} ({c:+.2f}%)"
 
 
-def call_gemini(prompt: str, max_tokens: int = 1200, temperature: float = 0.3) -> str:
-    """Gemini 2.0 Flash API 호출 (무료)"""
+# ─────────────────────────────────────────
+# Gemini 호출
+# ─────────────────────────────────────────
+
+def call_gemini(prompt: str, max_tokens: int = 600, temperature: float = 0.3) -> str:
     from google import genai
     from google.genai import types
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    response = client.models.generate_content(
+    resp = client.models.generate_content(
         model="gemini-2.0-flash",
         contents=prompt,
         config=types.GenerateContentConfig(
@@ -52,12 +66,31 @@ def call_gemini(prompt: str, max_tokens: int = 1200, temperature: float = 0.3) -
             temperature=temperature,
         ),
     )
-    return response.text.strip()
+    return resp.text.strip()
 
-def get_groq_assessment(summary: str) -> str:
+
+def get_ai_commentary(market_data: str) -> str:
+    """전체 지표 기반 시장 코멘트 생성"""
     try:
-        
-        return call_gemini(prompt, max_tokens=400, temperature=0.3)
+        prompt = f"""아래는 오늘 글로벌 시장 주요 지표입니다.
+
+{market_data}
+
+이 데이터를 종합해 오늘 장 전반에 대한 코멘트를 작성하세요.
+
+규칙:
+- 4~6줄 이내
+- 모든 문장은 명사형으로 끝낼 것 (예: ~우세, ~확대, ~주목, ~전망)
+- 실제 수치를 인용해 근거 제시
+- 아래 순서로 작성:
+  1) 리스크온/오프 판단 (근거 포함)
+  2) 금리/달러 방향성 해석
+  3) 원화 및 한국 증시 시사점
+  4) 오늘 주목할 포인트
+- 과도한 수식어 지양, 전문적 문체
+- 한국어로 작성
+- 줄바꿈으로 구분, 번호나 불릿 없이"""
+        return call_gemini(prompt, max_tokens=500, temperature=0.3)
     except Exception:
         return ""
 
@@ -71,141 +104,96 @@ def build_dashboard() -> str:
     time_str = kst_now.strftime("%Y-%m-%d %H:%M:%S")
 
     L  = []   # 출력 라인
-    SL = []   # Groq에 넘길 요약
+    SL = []   # Gemini에 넘길 요약
+
+    def add(label: str, v, c, decimals=2):
+        """값이 있으면 출력 + 요약에 추가, None이면 줄 자체를 생략"""
+        if v is None:
+            return
+        L.append(f"{label}: {fmt(v, c, decimals)}")
+        SL.append(f"{label.split()[-1].replace('*','')}: {v:.4f} ({c:+.2f}%)")
 
     L.append("🌍 *글로벌 매크로 대시보드*")
     L.append(f"🕒 기준 시각: {time_str} (KST)")
 
     # ── 핵심 지표 ──
     L.append(""); L.append("🔑 *핵심 지표 (금리/달러)*")
-
-    v, c = get_price("^IRX")
-    L.append(f"🇺🇸 미국채 2년: {fmt(v, c, 2)}")
-    if v: SL.append(f"미국채 2년: {v:.2f}% ({c:+.2f}%)")
-
-    v, c = get_price("^TNX")
-    L.append(f"🇺🇸 미국채 10년: {fmt(v, c, 2)}")
-    if v: SL.append(f"미국채 10년: {v:.2f}% ({c:+.2f}%)")
-
-    v, c = get_price("^TYX")
-    L.append(f"🇺🇸 미국채 30년: {fmt(v, c, 2)}")
-    if v: SL.append(f"미국채 30년: {v:.2f}% ({c:+.2f}%)")
-
-    v, c = get_price("DX-Y.NYB")
-    L.append(f"💵 달러 인덱스: {fmt(v, c, 2)}")
-    if v: SL.append(f"달러인덱스: {v:.2f} ({c:+.2f}%)")
+    v, c = get_price("^IRX");    add("🇺🇸 미국채 2년", v, c)
+    v, c = get_price("^TNX");    add("🇺🇸 미국채 10년", v, c)
+    v, c = get_price("^TYX");    add("🇺🇸 미국채 30년", v, c)
+    v, c = get_price("DX-Y.NYB"); add("💵 달러 인덱스", v, c)
 
     # ── 주요 환율 ──
     L.append(""); L.append("💱 *주요 환율 (FX)*")
-
     krw_v, krw_c = get_price("KRW=X")
-    L.append(f"🇰🇷 원/달러: {fmt(krw_v, krw_c, 2)}")
-    if krw_v: SL.append(f"원달러: {krw_v:.2f} ({krw_c:+.2f}%)")
+    add("🇰🇷 원/달러", krw_v, krw_c)
 
     jpy_v, _ = get_price("JPY=X")
     if krw_v and jpy_v:
         jpy_krw = krw_v / jpy_v
         try:
-            h_k = yf.Ticker("KRW=X").history(period="5d")
-            h_j = yf.Ticker("JPY=X").history(period="5d")
-            prev = h_k["Close"].iloc[-2] / h_j["Close"].iloc[-2]
+            h_k  = yf.Ticker("KRW=X").history(period="5d")
+            h_j  = yf.Ticker("JPY=X").history(period="5d")
+            prev = float(h_k["Close"].iloc[-2]) / float(h_j["Close"].iloc[-2])
             jc   = (jpy_krw - prev) / prev * 100
         except Exception:
             jc = 0.0
-        L.append(f"🇯🇵 엔/원 (1엔): {fmt(jpy_krw, jc, 2)}")
-    else:
-        L.append("🇯🇵 엔/원 (1엔): N/A")
+        if not math.isnan(jpy_krw):
+            L.append(f"🇯🇵 엔/원 (1엔): {fmt(jpy_krw, jc, 2)}")
 
-    v, c = get_price("EURUSD=X")
-    L.append(f"🇪🇺 유로/달러: {fmt(v, c, 4)}")
-
-    v, c = get_price("CNY=X")
-    L.append(f"🇨🇳 달러/위안: {fmt(v, c, 4)}")
+    v, c = get_price("EURUSD=X"); add("🇪🇺 유로/달러", v, c, 4)
+    v, c = get_price("CNY=X");    add("🇨🇳 달러/위안", v, c, 4)
 
     # ── 시장 심리 & 코인 ──
     L.append(""); L.append("📉 *시장 심리 & 코인*")
-
-    v, c = get_price("^VIX")
-    L.append(f"😨 VIX (공포지수): {fmt(v, c, 2)}")
-    if v: SL.append(f"VIX: {v:.2f} ({c:+.2f}%)")
-
-    v, c = get_price("BTC-USD")
-    L.append(f"🪙 비트코인: {fmt(v, c, 0)}")
-    if v: SL.append(f"비트코인: {v:,.0f} ({c:+.2f}%)")
-
-    v, c = get_price("ETH-USD")
-    L.append(f"💎 이더리움: {fmt(v, c, 0)}")
+    v, c = get_price("^VIX");    add("😨 VIX", v, c)
+    v, c = get_price("BTC-USD"); add("🪙 비트코인", v, c, 0)
+    v, c = get_price("ETH-USD"); add("💎 이더리움", v, c, 0)
 
     # ── 미국 지수 선물 ──
     L.append(""); L.append("🇺🇸 *미국 지수 선물 (Futures)*")
-
-    v, c = get_price("ES=F")
-    L.append(f"🇺🇸 S&P 500 선물: {fmt(v, c, 0)}")
-    if v: SL.append(f"S&P선물: {v:,.0f} ({c:+.2f}%)")
-
-    v, c = get_price("YM=F")
-    L.append(f"🇺🇸 다우 존스 선물: {fmt(v, c, 0)}")
-
-    v, c = get_price("NQ=F")
-    L.append(f"🇺🇸 나스닥 100 선물: {fmt(v, c, 0)}")
-    if v: SL.append(f"나스닥선물: {v:,.0f} ({c:+.2f}%)")
-
-    v, c = get_price("RTY=F")
-    L.append(f"🇺🇸 러셀 2000 선물: {fmt(v, c, 0)}")
+    v, c = get_price("ES=F");  add("🇺🇸 S&P 500 선물", v, c, 0)
+    v, c = get_price("YM=F");  add("🇺🇸 다우 존스 선물", v, c, 0)
+    v, c = get_price("NQ=F");  add("🇺🇸 나스닥 100 선물", v, c, 0)
+    v, c = get_price("RTY=F"); add("🇺🇸 러셀 2000 선물", v, c, 0)
 
     # ── 한국 & 아시아 ──
+    # KOSPI/KOSDAQ은 GitHub Actions에서 차단됨 → 데이터 있을 때만 표시
     L.append(""); L.append("🌏 *한국 & 아시아*")
-
     v, c = get_price("^KS11")
-    L.append(f"🇰🇷 코스피: {fmt(v, c, 0)}")
+    if v:
+        add("🇰🇷 코스피", v, c, 0)
+    else:
+        L.append("🇰🇷 코스피: 장중 확인 필요")
 
     v, c = get_price("^KQ11")
-    L.append(f"🇰🇷 코스닥: {fmt(v, c, 2)}")
+    if v:
+        add("🇰🇷 코스닥", v, c, 2)
+    else:
+        L.append("🇰🇷 코스닥: 장중 확인 필요")
 
-    v, c = get_price("^TWII")
-    L.append(f"🇹🇼 대만 가권: {fmt(v, c, 0)}")
-
-    v, c = get_price("^SOX")
-    L.append(f"💾 필라델피아 반도체: {fmt(v, c, 0)}")
-    if v: SL.append(f"필라델피아반도체: {v:,.0f} ({c:+.2f}%)")
-
-    v, c = get_price("^N225")
-    L.append(f"🇯🇵 니케이 225: {fmt(v, c, 0)}")
-
-    v, c = get_price("000001.SS")
-    L.append(f"🇨🇳 상해 종합: {fmt(v, c, 0)}")
-
-    v, c = get_price("^HSI")
-    L.append(f"🇭🇰 홍콩 항셍: {fmt(v, c, 0)}")
+    v, c = get_price("^TWII");      add("🇹🇼 대만 가권", v, c, 0)
+    v, c = get_price("^SOX");       add("💾 필라델피아 반도체", v, c, 0)
+    v, c = get_price("^N225");      add("🇯🇵 니케이 225", v, c, 0)
+    v, c = get_price("000001.SS");  add("🇨🇳 상해 종합", v, c, 0)
+    v, c = get_price("^HSI");       add("🇭🇰 홍콩 항셍", v, c, 0)
 
     # ── 원자재 & 귀금속 ──
     L.append(""); L.append("💢 *원자재 & 귀금속*")
+    v, c = get_price("CL=F"); add("🛢️ WTI 유가", v, c)
+    v, c = get_price("HG=F"); add("🏗️ 구리", v, c)
+    v, c = get_price("GC=F"); add("🥇 국제 금", v, c, 0)
+    v, c = get_price("SI=F"); add("🥈 국제 은", v, c)
+    v, c = get_price("ZC=F"); add("🌽 옥수수", v, c)
 
-    v, c = get_price("CL=F")
-    L.append(f"🛢️ WTI 유가: {fmt(v, c, 2)}")
-    if v: SL.append(f"WTI: {v:.2f} ({c:+.2f}%)")
-
-    v, c = get_price("HG=F")
-    L.append(f"🏗️ 구리: {fmt(v, c, 2)}")
-    if v: SL.append(f"구리: {v:.2f} ({c:+.2f}%)")
-
-    v, c = get_price("GC=F")
-    L.append(f"🥇 국제 금: {fmt(v, c, 0)}")
-    if v: SL.append(f"금: {v:,.0f} ({c:+.2f}%)")
-
-    v, c = get_price("SI=F")
-    L.append(f"🥈 국제 은: {fmt(v, c, 2)}")
-
-    v, c = get_price("ZC=F")
-    L.append(f"🌽 옥수수: {fmt(v, c, 2)}")
-
-    # ── AI 시장 평가 ──
-    assessment = get_groq_assessment("\n".join(SL))
-    if assessment:
+    # ── Gemini 코멘트 ──
+    commentary = get_ai_commentary("\n".join(SL))
+    if commentary:
         L.append("")
         L.append("━━━━━━━━━━━━━━━━━━━━")
-        L.append("🤖 *AI 시장 평가*")
-        for line in assessment.split("\n"):
+        L.append("🤖 *AI 시장 코멘트*")
+        L.append("")
+        for line in commentary.split("\n"):
             if line.strip():
                 L.append(line.strip())
 
