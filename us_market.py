@@ -15,7 +15,6 @@ import os
 import datetime
 import requests
 import yfinance as yf
-from groq import Groq
 
 
 # ─────────────────────────────────────────
@@ -28,6 +27,22 @@ def pct(curr, prev):
 def fmt(v, c):
     arrow = "🔺" if c >= 0 else "🔻"
     return f"{v:,.2f} ({'+' if c>=0 else ''}{c:.2f}% {arrow})"
+
+
+def call_gemini(prompt: str, max_tokens: int = 1200, temperature: float = 0.3) -> str:
+    """Gemini 2.0 Flash API 호출 (무료)"""
+    from google import genai
+    from google.genai import types
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            max_output_tokens=max_tokens,
+            temperature=temperature,
+        ),
+    )
+    return response.text.strip()
 
 def get_price(ticker):
     try:
@@ -178,15 +193,7 @@ def groq_pick_tickers(kst_date: str) -> list[tuple[str, str]]:
 - JSON 외 텍스트 절대 불가"""
 
     try:
-        client = Groq(api_key=os.environ["GROQ_API_KEY"])
-        msg = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=800,
-            temperature=0.1,
-        )
-        import json, re
-        raw = msg.choices[0].message.content.strip()
+        raw = call_gemini(prompt, max_tokens=800, temperature=0.1)
         # JSON 배열 추출
         match = re.search(r'\[.*\]', raw, re.DOTALL)
         if not match:
