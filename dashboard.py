@@ -1,9 +1,10 @@
 """
-dashboard.py v3
+dashboard.py v4
 ────────────────
 글로벌 매크로 대시보드
 - yfinance: 시장 데이터 (무료)
-- Gemini 2.0 Flash: 시장 코멘트 (무료)
+- Gemini 2.5 Flash: 시장 코멘트 (무료)
+- parse_mode HTML로 변경 (Markdown 파싱 오류 방지)
 매일 오전 7시 KST 텔레그램 전송
 """
 
@@ -19,12 +20,10 @@ import yfinance as yf
 # ─────────────────────────────────────────
 
 def get_price(ticker: str, period: str = "5d") -> tuple:
-    """(현재가, 등락률) 반환. 실패 시 (None, None)"""
     try:
         hist = yf.Ticker(ticker).history(period=period)
         if hist.empty:
             return None, None
-        # NaN 제거 후 마지막 유효값 사용
         close = hist["Close"].dropna()
         if len(close) < 2:
             return None, None
@@ -37,11 +36,8 @@ def get_price(ticker: str, period: str = "5d") -> tuple:
         return None, None
 
 
-def get_kr_index(ticker: str, period: str = "10d") -> tuple:
-    """
-    한국 지수 전용 수집 함수.
-    더 긴 기간으로 시도하고, 유효한 마지막 값 사용.
-    """
+def get_kr_index(ticker: str) -> tuple:
+    """한국 지수 전용 — 여러 기간 시도"""
     for p in ["2d", "5d", "10d", "1mo"]:
         try:
             hist = yf.Ticker(ticker).history(period=p)
@@ -52,10 +48,7 @@ def get_kr_index(ticker: str, period: str = "10d") -> tuple:
                 continue
             curr = float(close.iloc[-1])
             prev = float(close.iloc[-2])
-            if prev == 0 or curr == 0:
-                continue
-            # 비현실적 수치 필터 (예: 0.1 이하이거나 너무 작은 경우)
-            if curr < 100:
+            if prev == 0 or curr < 100:
                 continue
             return curr, (curr - prev) / prev * 100
         except Exception:
@@ -64,12 +57,17 @@ def get_kr_index(ticker: str, period: str = "10d") -> tuple:
 
 
 def fmt(value, chg, decimals=2, comma=True) -> str:
-    if value is None or math.isnan(value):
+    if value is None:
         return "N/A"
     arrow = "🔺" if chg >= 0 else "▼"
     sign  = "+" if chg >= 0 else ""
     num   = f"{value:,.{decimals}f}" if comma else f"{value:.{decimals}f}"
     return f"{num} ({sign}{chg:.2f}% {arrow})"
+
+
+def b(text: str) -> str:
+    """HTML 볼드"""
+    return f"<b>{text}</b>"
 
 
 # ─────────────────────────────────────────
@@ -115,11 +113,12 @@ def get_ai_commentary(market_data: str) -> str:
 - 한국 투자자 입장에서 오늘 가장 주의할 포인트
 - 모든 문장 명사형 마무리
 - 줄바꿈으로 구분, 불릿/번호/대괄호 절대 사용 금지
+- 특수기호 사용 금지 (HTML 태그, 마크다운 기호 등)
 - 한국어, 전문적이고 간결한 문체"""
         return call_gemini(prompt, max_tokens=600, temperature=0.5)
     except Exception as e:
         print(f"Gemini 오류: {e}")
-        return f"⚠️ AI 코멘트 생성 실패: {e}"
+        return f"⚠️ AI 코멘트 생성 실패: {str(e)[:100]}"
 
 
 # ─────────────────────────────────────────
@@ -130,28 +129,28 @@ def build_dashboard() -> str:
     kst_now  = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
     time_str = kst_now.strftime("%Y-%m-%d %H:%M:%S")
 
-    L  = []   # 출력 라인
-    SL = []   # Gemini에 넘길 요약
+    L  = []
+    SL = []
 
     def add(label: str, v, c, decimals=2):
-        """값이 있으면 출력 + 요약 추가, None이면 줄 생략"""
         if v is None:
             return
         L.append(f"{label}: {fmt(v, c, decimals)}")
-        SL.append(f"{label.split()[-1].replace('*','')}: {v:.4f} ({c:+.2f}%)")
+        key = label.split()[-1]
+        SL.append(f"{key}: {v:.4f} ({c:+.2f}%)")
 
-    L.append("🌍 *글로벌 매크로 대시보드*")
+    L.append(b("🌍 글로벌 매크로 대시보드"))
     L.append(f"🕒 기준 시각: {time_str} (KST)")
 
     # ── 핵심 지표 ──
-    L.append(""); L.append("🔑 *핵심 지표 (금리/달러)*")
+    L.append(""); L.append(b("🔑 핵심 지표 (금리/달러)"))
     v, c = get_price("^IRX");     add("🇺🇸 미국채 2년", v, c)
     v, c = get_price("^TNX");     add("🇺🇸 미국채 10년", v, c)
     v, c = get_price("^TYX");     add("🇺🇸 미국채 30년", v, c)
     v, c = get_price("DX-Y.NYB"); add("💵 달러 인덱스", v, c)
 
     # ── 주요 환율 ──
-    L.append(""); L.append("💱 *주요 환율 (FX)*")
+    L.append(""); L.append(b("💱 주요 환율 (FX)"))
     krw_v, krw_c = get_price("KRW=X")
     add("🇰🇷 원/달러", krw_v, krw_c)
 
@@ -161,32 +160,31 @@ def build_dashboard() -> str:
         try:
             h_k  = yf.Ticker("KRW=X").history(period="5d")
             h_j  = yf.Ticker("JPY=X").history(period="5d")
-            prev = float(h_k["Close"].iloc[-2]) / float(h_j["Close"].iloc[-2])
+            prev = float(h_k["Close"].dropna().iloc[-2]) / float(h_j["Close"].dropna().iloc[-2])
             jc   = (jpy_krw - prev) / prev * 100
         except Exception:
             jc = 0.0
-        if not math.isnan(jpy_krw):
-            L.append(f"🇯🇵 엔/원 (1엔): {fmt(jpy_krw, jc, 2)}")
-            SL.append(f"엔원: {jpy_krw:.2f} ({jc:+.2f}%)")
+        L.append(f"🇯🇵 엔/원 (1엔): {fmt(jpy_krw, jc, 2)}")
+        SL.append(f"엔원: {jpy_krw:.2f} ({jc:+.2f}%)")
 
     v, c = get_price("EURUSD=X"); add("🇪🇺 유로/달러", v, c, 4)
     v, c = get_price("CNY=X");    add("🇨🇳 달러/위안", v, c, 4)
 
     # ── 시장 심리 & 코인 ──
-    L.append(""); L.append("📉 *시장 심리 & 코인*")
+    L.append(""); L.append(b("📉 시장 심리 & 코인"))
     v, c = get_price("^VIX");    add("😨 VIX", v, c)
     v, c = get_price("BTC-USD"); add("🪙 비트코인", v, c, 0)
     v, c = get_price("ETH-USD"); add("💎 이더리움", v, c, 0)
 
     # ── 미국 지수 선물 ──
-    L.append(""); L.append("🇺🇸 *미국 지수 선물 (Futures)*")
+    L.append(""); L.append(b("🇺🇸 미국 지수 선물 (Futures)"))
     v, c = get_price("ES=F");  add("🇺🇸 S&P 500 선물", v, c, 0)
     v, c = get_price("YM=F");  add("🇺🇸 다우 존스 선물", v, c, 0)
     v, c = get_price("NQ=F");  add("🇺🇸 나스닥 100 선물", v, c, 0)
     v, c = get_price("RTY=F"); add("🇺🇸 러셀 2000 선물", v, c, 0)
 
     # ── 한국 & 아시아 ──
-    L.append(""); L.append("🌏 *한국 & 아시아*")
+    L.append(""); L.append(b("🌏 한국 & 아시아"))
     v, c = get_kr_index("^KS11")
     if v:
         add("🇰🇷 코스피", v, c, 0)
@@ -206,7 +204,7 @@ def build_dashboard() -> str:
     v, c = get_price("^HSI");      add("🇭🇰 홍콩 항셍", v, c, 0)
 
     # ── 원자재 & 귀금속 ──
-    L.append(""); L.append("💢 *원자재 & 귀금속*")
+    L.append(""); L.append(b("💢 원자재 & 귀금속"))
     v, c = get_price("CL=F"); add("🛢️ WTI 유가", v, c)
     v, c = get_price("HG=F"); add("🏗️ 구리", v, c)
     v, c = get_price("GC=F"); add("🥇 국제 금", v, c, 0)
@@ -219,20 +217,17 @@ def build_dashboard() -> str:
     if commentary:
         L.append("")
         L.append("━━━━━━━━━━━━━━━━━━━━")
-        L.append("🤖 AI 시장 코멘트")
+        L.append(b("🤖 AI 시장 코멘트"))
         L.append("")
         for line in commentary.split("\n"):
-            line = line.strip()
-            if line:
-                # 마크다운 특수문자 이스케이프 (대괄호, 언더바 등)
-                line = line.replace("[", "〔").replace("]", "〕")
-                L.append(line)
+            if line.strip():
+                L.append(line.strip())
 
     return "\n".join(L)
 
 
 # ─────────────────────────────────────────
-# Telegram 전송
+# Telegram 전송 (HTML 모드)
 # ─────────────────────────────────────────
 
 def send_telegram(text: str):
@@ -241,20 +236,17 @@ def send_telegram(text: str):
     for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
         resp = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown"},
+            json={"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"},
             timeout=15,
         )
         if not resp.ok:
+            # HTML도 실패하면 plain text로 재시도
             requests.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
                 json={"chat_id": chat_id, "text": chunk},
                 timeout=15,
             )
 
-
-# ─────────────────────────────────────────
-# 메인
-# ─────────────────────────────────────────
 
 def main():
     print("대시보드 생성 중...")
