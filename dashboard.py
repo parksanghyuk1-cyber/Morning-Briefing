@@ -19,18 +19,48 @@ import yfinance as yf
 # ─────────────────────────────────────────
 
 def get_price(ticker: str, period: str = "5d") -> tuple:
-    """(현재가, 등락률) 반환. NaN/실패 시 (None, None)"""
+    """(현재가, 등락률) 반환. 실패 시 (None, None)"""
     try:
         hist = yf.Ticker(ticker).history(period=period)
-        if len(hist) < 2:
+        if hist.empty:
             return None, None
-        prev = float(hist["Close"].iloc[-2])
-        curr = float(hist["Close"].iloc[-1])
-        if math.isnan(curr) or math.isnan(prev) or prev == 0:
+        # NaN 제거 후 마지막 유효값 사용
+        close = hist["Close"].dropna()
+        if len(close) < 2:
+            return None, None
+        curr = float(close.iloc[-1])
+        prev = float(close.iloc[-2])
+        if prev == 0:
             return None, None
         return curr, (curr - prev) / prev * 100
     except Exception:
         return None, None
+
+
+def get_kr_index(ticker: str, period: str = "10d") -> tuple:
+    """
+    한국 지수 전용 수집 함수.
+    더 긴 기간으로 시도하고, 유효한 마지막 값 사용.
+    """
+    for p in ["2d", "5d", "10d", "1mo"]:
+        try:
+            hist = yf.Ticker(ticker).history(period=p)
+            if hist.empty:
+                continue
+            close = hist["Close"].dropna()
+            if len(close) < 2:
+                continue
+            curr = float(close.iloc[-1])
+            prev = float(close.iloc[-2])
+            if prev == 0 or curr == 0:
+                continue
+            # 비현실적 수치 필터 (예: 0.1 이하이거나 너무 작은 경우)
+            if curr < 100:
+                continue
+            return curr, (curr - prev) / prev * 100
+        except Exception:
+            continue
+    return None, None
 
 
 def fmt(value, chg, decimals=2, comma=True) -> str:
@@ -73,18 +103,18 @@ def get_ai_commentary(market_data: str) -> str:
 
 출력 형식 (반드시 이 형식 그대로):
 
-[시장 국면]
-🟢 리스크온 / 🔴 리스크오프 / 🟡 중립 중 하나만 선택 후, 한 줄로 핵심 근거 작성
-예시: 🔴 리스크오프 — 장기금리 급등 + 달러 강세 + 선물 하락이 동반되며 위험자산 회피 국면
+첫 줄: 시장 국면 판단
+🟢 리스크온 / 🔴 리스크오프 / 🟡 중립 중 하나 선택 후 대시(—)로 핵심 근거 한 줄 작성
+예: 🔴 리스크오프 — 장기금리 급등과 달러 강세가 동반되며 위험자산 회피 국면
 
-[시장 해석]
-아래 관점 중 오늘 데이터에서 중요한 것 4~5줄로 작성.
-- 수치 나열 절대 금지. "X%가 올랐다" 식 서술 금지
-- 그 움직임의 의미, 함의, 투자자에게 주는 시사점 위주
-- 금리 커브/달러/원자재/선물이 보내는 매크로 신호
+빈 줄 하나
+
+나머지 4~5줄: 시장 해석
+- 수치 나열 절대 금지. 움직임의 의미와 투자 시사점 위주
+- 금리 커브, 달러, 원자재, 선물이 보내는 매크로 신호
 - 한국 투자자 입장에서 오늘 가장 주의할 포인트
-- 모든 문장 명사형 마무리 (예: ~우려, ~전망, ~주목, ~확대)
-- 줄바꿈으로 구분, 불릿/번호 없이
+- 모든 문장 명사형 마무리
+- 줄바꿈으로 구분, 불릿/번호/대괄호 절대 사용 금지
 - 한국어, 전문적이고 간결한 문체"""
         return call_gemini(prompt, max_tokens=600, temperature=0.5)
     except Exception as e:
@@ -157,17 +187,17 @@ def build_dashboard() -> str:
 
     # ── 한국 & 아시아 ──
     L.append(""); L.append("🌏 *한국 & 아시아*")
-    v, c = get_price("^KS11")
+    v, c = get_kr_index("^KS11")
     if v:
         add("🇰🇷 코스피", v, c, 0)
     else:
-        L.append("🇰🇷 코스피: 장중 확인 필요")
+        L.append("🇰🇷 코스피: 데이터 없음")
 
-    v, c = get_price("^KQ11")
+    v, c = get_kr_index("^KQ11")
     if v:
         add("🇰🇷 코스닥", v, c, 2)
     else:
-        L.append("🇰🇷 코스닥: 장중 확인 필요")
+        L.append("🇰🇷 코스닥: 데이터 없음")
 
     v, c = get_price("^TWII");     add("🇹🇼 대만 가권", v, c, 0)
     v, c = get_price("^SOX");      add("💾 필라델피아 반도체", v, c, 0)
@@ -189,11 +219,14 @@ def build_dashboard() -> str:
     if commentary:
         L.append("")
         L.append("━━━━━━━━━━━━━━━━━━━━")
-        L.append("🤖 *AI 시장 코멘트*")
+        L.append("🤖 AI 시장 코멘트")
         L.append("")
         for line in commentary.split("\n"):
-            if line.strip():
-                L.append(line.strip())
+            line = line.strip()
+            if line:
+                # 마크다운 특수문자 이스케이프 (대괄호, 언더바 등)
+                line = line.replace("[", "〔").replace("]", "〕")
+                L.append(line)
 
     return "\n".join(L)
 
