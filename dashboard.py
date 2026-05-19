@@ -3,7 +3,7 @@ dashboard.py v3
 ────────────────
 글로벌 매크로 대시보드
 - yfinance: 시장 데이터 (무료)
-- Gemini 2.0 Flash: 경제지표 코멘트 (무료)
+- Gemini 2.0 Flash: 시장 코멘트 (무료)
 매일 오전 7시 KST 텔레그램 전송
 """
 
@@ -26,7 +26,6 @@ def get_price(ticker: str, period: str = "5d") -> tuple:
             return None, None
         prev = float(hist["Close"].iloc[-2])
         curr = float(hist["Close"].iloc[-1])
-        # NaN 체크
         if math.isnan(curr) or math.isnan(prev) or prev == 0:
             return None, None
         return curr, (curr - prev) / prev * 100
@@ -41,13 +40,6 @@ def fmt(value, chg, decimals=2, comma=True) -> str:
     sign  = "+" if chg >= 0 else ""
     num   = f"{value:,.{decimals}f}" if comma else f"{value:.{decimals}f}"
     return f"{num} ({sign}{chg:.2f}% {arrow})"
-
-
-def safe_line(label: str, v, c, decimals=2) -> tuple[str, str | None]:
-    """라인 문자열과 요약 문자열 반환. N/A면 라인은 숨김."""
-    if v is None:
-        return None, None  # 숨김
-    return f"{label}: {fmt(v, c, decimals)}", f"{label.split()[-1]}: {v:.2f} ({c:+.2f}%)"
 
 
 # ─────────────────────────────────────────
@@ -70,7 +62,9 @@ def call_gemini(prompt: str, max_tokens: int = 600, temperature: float = 0.3) ->
 
 
 def get_ai_commentary(market_data: str) -> str:
-    """전체 지표 기반 시장 코멘트 생성"""
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        return "⚠️ GEMINI_API_KEY 미설정"
     try:
         prompt = f"""아래는 오늘 글로벌 시장 주요 지표입니다.
 
@@ -91,8 +85,9 @@ def get_ai_commentary(market_data: str) -> str:
 - 한국어로 작성
 - 줄바꿈으로 구분, 번호나 불릿 없이"""
         return call_gemini(prompt, max_tokens=500, temperature=0.3)
-    except Exception:
-        return ""
+    except Exception as e:
+        print(f"Gemini 오류: {e}")
+        return f"⚠️ AI 코멘트 생성 실패: {e}"
 
 
 # ─────────────────────────────────────────
@@ -107,7 +102,7 @@ def build_dashboard() -> str:
     SL = []   # Gemini에 넘길 요약
 
     def add(label: str, v, c, decimals=2):
-        """값이 있으면 출력 + 요약에 추가, None이면 줄 자체를 생략"""
+        """값이 있으면 출력 + 요약 추가, None이면 줄 생략"""
         if v is None:
             return
         L.append(f"{label}: {fmt(v, c, decimals)}")
@@ -118,9 +113,9 @@ def build_dashboard() -> str:
 
     # ── 핵심 지표 ──
     L.append(""); L.append("🔑 *핵심 지표 (금리/달러)*")
-    v, c = get_price("^IRX");    add("🇺🇸 미국채 2년", v, c)
-    v, c = get_price("^TNX");    add("🇺🇸 미국채 10년", v, c)
-    v, c = get_price("^TYX");    add("🇺🇸 미국채 30년", v, c)
+    v, c = get_price("^IRX");     add("🇺🇸 미국채 2년", v, c)
+    v, c = get_price("^TNX");     add("🇺🇸 미국채 10년", v, c)
+    v, c = get_price("^TYX");     add("🇺🇸 미국채 30년", v, c)
     v, c = get_price("DX-Y.NYB"); add("💵 달러 인덱스", v, c)
 
     # ── 주요 환율 ──
@@ -140,6 +135,7 @@ def build_dashboard() -> str:
             jc = 0.0
         if not math.isnan(jpy_krw):
             L.append(f"🇯🇵 엔/원 (1엔): {fmt(jpy_krw, jc, 2)}")
+            SL.append(f"엔원: {jpy_krw:.2f} ({jc:+.2f}%)")
 
     v, c = get_price("EURUSD=X"); add("🇪🇺 유로/달러", v, c, 4)
     v, c = get_price("CNY=X");    add("🇨🇳 달러/위안", v, c, 4)
@@ -158,7 +154,6 @@ def build_dashboard() -> str:
     v, c = get_price("RTY=F"); add("🇺🇸 러셀 2000 선물", v, c, 0)
 
     # ── 한국 & 아시아 ──
-    # KOSPI/KOSDAQ은 GitHub Actions에서 차단됨 → 데이터 있을 때만 표시
     L.append(""); L.append("🌏 *한국 & 아시아*")
     v, c = get_price("^KS11")
     if v:
@@ -172,11 +167,11 @@ def build_dashboard() -> str:
     else:
         L.append("🇰🇷 코스닥: 장중 확인 필요")
 
-    v, c = get_price("^TWII");      add("🇹🇼 대만 가권", v, c, 0)
-    v, c = get_price("^SOX");       add("💾 필라델피아 반도체", v, c, 0)
-    v, c = get_price("^N225");      add("🇯🇵 니케이 225", v, c, 0)
-    v, c = get_price("000001.SS");  add("🇨🇳 상해 종합", v, c, 0)
-    v, c = get_price("^HSI");       add("🇭🇰 홍콩 항셍", v, c, 0)
+    v, c = get_price("^TWII");     add("🇹🇼 대만 가권", v, c, 0)
+    v, c = get_price("^SOX");      add("💾 필라델피아 반도체", v, c, 0)
+    v, c = get_price("^N225");     add("🇯🇵 니케이 225", v, c, 0)
+    v, c = get_price("000001.SS"); add("🇨🇳 상해 종합", v, c, 0)
+    v, c = get_price("^HSI");      add("🇭🇰 홍콩 항셍", v, c, 0)
 
     # ── 원자재 & 귀금속 ──
     L.append(""); L.append("💢 *원자재 & 귀금속*")
@@ -187,6 +182,7 @@ def build_dashboard() -> str:
     v, c = get_price("ZC=F"); add("🌽 옥수수", v, c)
 
     # ── Gemini 코멘트 ──
+    print("  → Gemini 코멘트 생성 중...")
     commentary = get_ai_commentary("\n".join(SL))
     if commentary:
         L.append("")
@@ -221,10 +217,15 @@ def send_telegram(text: str):
             )
 
 
+# ─────────────────────────────────────────
+# 메인
+# ─────────────────────────────────────────
+
 def main():
     print("대시보드 생성 중...")
     dashboard = build_dashboard()
     print(dashboard)
+    print("\n텔레그램 전송 중...")
     send_telegram(dashboard)
     print("✅ 완료")
 
