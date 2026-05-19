@@ -38,31 +38,26 @@ def fmt(value, chg, decimals=2, comma=True) -> str:
 # Groq 시장 평가
 # ─────────────────────────────────────────
 
+
+def call_gemini(prompt: str, max_tokens: int = 1200, temperature: float = 0.3) -> str:
+    """Gemini 2.0 Flash API 호출 (무료)"""
+    from google import genai
+    from google.genai import types
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            max_output_tokens=max_tokens,
+            temperature=temperature,
+        ),
+    )
+    return response.text.strip()
+
 def get_groq_assessment(summary: str) -> str:
     try:
-        from groq import Groq
-        client = Groq(api_key=os.environ["GROQ_API_KEY"])
-        prompt = f"""아래는 오늘 글로벌 시장 주요 데이터입니다.
-
-{summary}
-
-이 데이터를 종합해 오늘 장 전반에 대한 평가를 작성하세요.
-
-규칙:
-- 3~5줄 이내
-- 모든 문장은 명사형으로 끝낼 것 (예: ~우세, ~확대, ~주목)
-- 실제 수치를 인용해 근거 제시
-- 리스크온/오프 판단 → 핵심 변수 → 오늘 주목할 포인트 순서
-- 과도한 수식어 지양, 전문적 문체
-- 한국어로 작성"""
-
-        msg = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=400,
-            temperature=0.3,
-        )
-        return msg.choices[0].message.content.strip()
+        
+        return call_gemini(prompt, max_tokens=400, temperature=0.3)
     except Exception:
         return ""
 
