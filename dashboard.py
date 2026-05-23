@@ -234,17 +234,16 @@ def build_dashboard() -> tuple[str, str]:
 # Telegram 전송 (HTML 모드)
 # ─────────────────────────────────────────
 
-def send_telegram(text: str):
+def send_telegram(text: str, parse_mode: str = "HTML"):
     token   = os.environ["TELEGRAM_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
 
-    # 4000자 강제 절단 대신 줄바꿈 기준으로 청크 분할
+    # 줄바꿈 기준으로 청크 분할 (문장 중간 절단 방지)
     chunks = []
     current = []
     current_len = 0
-
     for line in text.split("\n"):
-        line_len = len(line) + 1  # +1은 줄바꿈
+        line_len = len(line) + 1
         if current_len + line_len > 3800 and current:
             chunks.append("\n".join(current))
             current = [line]
@@ -252,17 +251,20 @@ def send_telegram(text: str):
         else:
             current.append(line)
             current_len += line_len
-
     if current:
         chunks.append("\n".join(current))
 
     for chunk in chunks:
+        payload = {"chat_id": chat_id, "text": chunk}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         resp = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"},
+            json=payload,
             timeout=15,
         )
         if not resp.ok:
+            # 파싱 실패 시 plain text로 재시도
             requests.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
                 json={"chat_id": chat_id, "text": chunk},
@@ -275,9 +277,9 @@ def main():
     dashboard, ai_comment = build_dashboard()
     print(dashboard)
     print("\n텔레그램 전송 중...")
-    send_telegram(dashboard)
+    send_telegram(dashboard)                        # 본문: HTML 모드
     if ai_comment:
-        send_telegram(ai_comment)
+        send_telegram(ai_comment, parse_mode="")    # AI 코멘트: plain text
     print("✅ 완료")
 
 
