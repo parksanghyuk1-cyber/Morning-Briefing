@@ -168,35 +168,30 @@ def get_ai_commentary(market_data: str, anomalies: list[str]) -> str:
 {anomaly_section}
 
 아래 4개 섹션을 순서대로 작성하세요. 각 섹션 사이에 빈 줄 하나.
+각 섹션은 반드시 2문장 이내로 간결하게 작성 (토큰 절약).
 
 [섹션 1 — 오늘의 특이사항]
-급등락 항목이 있으면 반드시 언급. 왜 그 지표가 움직였는지 가능한 원인(금리 결정, 지정학, 수급)과 함께 설명.
-특이사항이 없으면 "특이 급등락 없음" 한 줄로 마무리.
-2~4문장.
+급등락 항목이 있으면 지표명·변동폭·가능한 원인(금리 결정·지정학·수급) 포함.
+특이사항이 없으면 "특이 급등락 없음" 한 줄.
 
 [섹션 2 — 매크로 → 증시 파급 경로]
-금리·달러·원화·VIX·원자재가 국내 증시(코스피/코스닥)에 미치는 구체적 경로를 설명.
-예: "10년물 금리 급등 → 성장주 밸류에이션 압박 → 코스닥 낙폭 확대 우려" 식으로.
-2~3문장.
+금리·달러·원화·VIX가 코스피/코스닥에 미치는 구체적 인과 경로를 화살표(→) 형식으로.
+예: "10년물 금리 급등 → 성장주 밸류 압박 → 코스닥 낙폭 확대 우려"
 
 [섹션 3 — 섹터·종목 시사점]
-오늘 지표 흐름상 유리한 섹터와 불리한 섹터를 각 1~2개 구체적으로 언급.
-한국 상장 관련 업종이나 대표 섹터 기준으로.
-2~3문장.
+유리한 섹터 1개, 불리한 섹터 1개를 한국 상장 업종 기준으로 명시.
 
 [섹션 4 — 오늘 대응 전략]
-위 내용을 종합해 오늘 국내 투자자가 취해야 할 포지션·리스크 관리 방향을 구체적으로 제시.
-리스크온/오프 판단과 함께 비중 조절 방향이나 헤지 아이디어 포함.
-3~4문장.
+🟢/🔴/🟡 리스크 판단 명시 후, 비중 조절·헤지 방향을 2문장 이내로.
 
 작성 규칙:
-- 섹션 제목([섹션 N — ...]) 포함해서 작성
-- 수치 단순 나열 금지, 반드시 해석과 시사점 포함
-- 모든 문장은 명사형으로 마무리 (예: ~우려, ~전망, ~주목, ~확대, ~판단)
-- HTML 태그, 마크다운 기호 사용 금지
-- 전문적이고 간결한 한국어"""
+- 섹션 제목([섹션 N — ...]) 반드시 포함
+- 수치 단순 나열 금지, 해석·시사점 포함
+- 모든 문장 명사형 마무리 (~우려, ~전망, ~주목, ~판단)
+- HTML 태그, 마크다운 기호 절대 금지
+- 전문적·간결한 한국어"""
 
-        raw = call_gemini(prompt, max_tokens=1800, temperature=0.5)
+        raw = call_gemini(prompt, max_tokens=900, temperature=0.5)
         return normalize_newlines(raw)
     except Exception as e:
         print(f"Gemini 오류: {e}")
@@ -206,8 +201,8 @@ def get_ai_commentary(market_data: str, anomalies: list[str]) -> str:
 # ─────────────────────────────────────────
 # 대시보드 조립
 # ─────────────────────────────────────────
-def build_dashboard() -> str:
-    """완성된 단일 메시지 반환 (지표 + AI 코멘트 통합)"""
+def build_dashboard() -> tuple[str, str]:
+    """(지표 메시지, AI 코멘트 메시지) 튜플 반환 — 각각 독립 전송"""
     kst_now  = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
     time_str = kst_now.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -304,27 +299,28 @@ def build_dashboard() -> str:
         for a in anomalies:
             L.append(f"• {a}")
 
-    # ── AI 코멘트 생성 및 통합 ──
+    # ── AI 코멘트 생성 (별도 메시지) ──
     print("  → Gemini 코멘트 생성 중...")
     commentary = get_ai_commentary("\n".join(SL), anomalies)
 
+    ai_lines = []
     if commentary:
-        L.append("")
-        L.append("━━━━━━━━━━━━━━━━━━━━")
-        L.append(b("🤖 AI 시장 브리핑"))
-        L.append("")
+        ai_lines.append(b("🤖 AI 시장 브리핑"))
+        ai_lines.append("")
         for line in commentary.split("\n"):
             stripped = line.strip()
             if not stripped:
-                L.append("")
+                ai_lines.append("")
                 continue
             # 섹션 헤더는 볼드 처리
             if stripped.startswith("[섹션"):
-                L.append(b(stripped))
+                ai_lines.append(b(stripped))
             else:
-                L.append(stripped)
+                ai_lines.append(stripped)
 
-    return "\n".join(L)
+    indicators_msg = "\n".join(L)
+    ai_msg         = "\n".join(ai_lines) if ai_lines else ""
+    return indicators_msg, ai_msg
 
 
 # ─────────────────────────────────────────
@@ -377,10 +373,17 @@ def send_telegram(text: str, parse_mode: str = "HTML"):
 
 def main():
     print("대시보드 생성 중...")
-    message = build_dashboard()
-    print(message)
+    indicators_msg, ai_msg = build_dashboard()
+    print(indicators_msg)
+    print("\n--- AI 코멘트 ---")
+    print(ai_msg)
+
     print("\n텔레그램 전송 중...")
-    send_telegram(message, parse_mode="HTML")
+    # 메시지 1: 지표 + 급등락 알림 (HTML)
+    send_telegram(indicators_msg, parse_mode="HTML")
+    # 메시지 2: AI 브리핑 (항상 새 메시지, HTML)
+    if ai_msg:
+        send_telegram(ai_msg, parse_mode="HTML")
     print("✅ 완료")
 
 
