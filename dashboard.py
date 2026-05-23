@@ -221,7 +221,7 @@ def build_dashboard() -> tuple[str, str]:
     ai_msg = ""
     if commentary:
         lines = ["━━━━━━━━━━━━━━━━━━━━",
-                 b("🤖 AI 시장 코멘트"), ""]
+                 "🤖 AI 시장 코멘트", ""]
         for line in commentary.split("\n"):
             if line.strip():
                 lines.append(line.strip())
@@ -234,27 +234,37 @@ def build_dashboard() -> tuple[str, str]:
 # Telegram 전송 (HTML 모드)
 # ─────────────────────────────────────────
 
+def split_into_chunks(text: str, limit: int = 3800) -> list[str]:
+    """줄바꿈 → 문장 단위로 안전하게 분할"""
+    chunks = []
+    current = ""
+
+    for line in text.split("\n"):
+        # 한 줄이 limit보다 길면 문장(.) 단위로 추가 분할
+        if len(line) > limit:
+            sentences = line.replace(". ", ".\n").split("\n")
+        else:
+            sentences = [line]
+
+        for sentence in sentences:
+            candidate = current + "\n" + sentence if current else sentence
+            if len(candidate) > limit and current:
+                chunks.append(current)
+                current = sentence
+            else:
+                current = candidate
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
 def send_telegram(text: str, parse_mode: str = "HTML"):
     token   = os.environ["TELEGRAM_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
 
-    # 줄바꿈 기준으로 청크 분할 (문장 중간 절단 방지)
-    chunks = []
-    current = []
-    current_len = 0
-    for line in text.split("\n"):
-        line_len = len(line) + 1
-        if current_len + line_len > 3800 and current:
-            chunks.append("\n".join(current))
-            current = [line]
-            current_len = line_len
-        else:
-            current.append(line)
-            current_len += line_len
-    if current:
-        chunks.append("\n".join(current))
-
-    for chunk in chunks:
+    for chunk in split_into_chunks(text):
         payload = {"chat_id": chat_id, "text": chunk}
         if parse_mode:
             payload["parse_mode"] = parse_mode
@@ -264,7 +274,6 @@ def send_telegram(text: str, parse_mode: str = "HTML"):
             timeout=15,
         )
         if not resp.ok:
-            # 파싱 실패 시 plain text로 재시도
             requests.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
                 json={"chat_id": chat_id, "text": chunk},
