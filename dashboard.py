@@ -125,7 +125,8 @@ def get_ai_commentary(market_data: str) -> str:
 # 대시보드 조립
 # ─────────────────────────────────────────
 
-def build_dashboard() -> str:
+def build_dashboard() -> tuple[str, str]:
+    """(본문, AI코멘트) 튜플 반환"""
     kst_now  = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
     time_str = kst_now.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -186,16 +187,12 @@ def build_dashboard() -> str:
     # ── 한국 & 아시아 ──
     L.append(""); L.append(b("🌏 한국 & 아시아"))
     v, c = get_kr_index("^KS11")
-    if v:
-        add("🇰🇷 코스피", v, c, 0)
-    else:
-        L.append("🇰🇷 코스피: 데이터 없음")
+    if v: add("🇰🇷 코스피", v, c, 0)
+    else: L.append("🇰🇷 코스피: 데이터 없음")
 
     v, c = get_kr_index("^KQ11")
-    if v:
-        add("🇰🇷 코스닥", v, c, 2)
-    else:
-        L.append("🇰🇷 코스닥: 데이터 없음")
+    if v: add("🇰🇷 코스닥", v, c, 2)
+    else: L.append("🇰🇷 코스닥: 데이터 없음")
 
     v, c = get_price("^TWII");     add("🇹🇼 대만 가권", v, c, 0)
     v, c = get_price("^SOX");      add("💾 필라델피아 반도체", v, c, 0)
@@ -211,19 +208,20 @@ def build_dashboard() -> str:
     v, c = get_price("SI=F"); add("🥈 국제 은", v, c)
     v, c = get_price("ZC=F"); add("🌽 옥수수", v, c)
 
-    # ── Gemini 코멘트 ──
+    # AI 코멘트는 별도 생성
     print("  → Gemini 코멘트 생성 중...")
     commentary = get_ai_commentary("\n".join(SL))
+
+    ai_msg = ""
     if commentary:
-        L.append("")
-        L.append("━━━━━━━━━━━━━━━━━━━━")
-        L.append(b("🤖 AI 시장 코멘트"))
-        L.append("")
+        lines = ["━━━━━━━━━━━━━━━━━━━━",
+                 b("🤖 AI 시장 코멘트"), ""]
         for line in commentary.split("\n"):
             if line.strip():
-                L.append(line.strip())
+                lines.append(line.strip())
+        ai_msg = "\n".join(lines)
 
-    return "\n".join(L)
+    return "\n".join(L), ai_msg
 
 
 # ─────────────────────────────────────────
@@ -233,14 +231,32 @@ def build_dashboard() -> str:
 def send_telegram(text: str):
     token   = os.environ["TELEGRAM_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
-    for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
+
+    # 4000자 강제 절단 대신 줄바꿈 기준으로 청크 분할
+    chunks = []
+    current = []
+    current_len = 0
+
+    for line in text.split("\n"):
+        line_len = len(line) + 1  # +1은 줄바꿈
+        if current_len + line_len > 3800 and current:
+            chunks.append("\n".join(current))
+            current = [line]
+            current_len = line_len
+        else:
+            current.append(line)
+            current_len += line_len
+
+    if current:
+        chunks.append("\n".join(current))
+
+    for chunk in chunks:
         resp = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
             json={"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"},
             timeout=15,
         )
         if not resp.ok:
-            # HTML도 실패하면 plain text로 재시도
             requests.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
                 json={"chat_id": chat_id, "text": chunk},
@@ -250,10 +266,12 @@ def send_telegram(text: str):
 
 def main():
     print("대시보드 생성 중...")
-    dashboard = build_dashboard()
+    dashboard, ai_comment = build_dashboard()
     print(dashboard)
     print("\n텔레그램 전송 중...")
     send_telegram(dashboard)
+    if ai_comment:
+        send_telegram(ai_comment)
     print("✅ 완료")
 
 
