@@ -4,7 +4,7 @@ dashboard.py v7
 글로벌 매크로 대시보드
 - yfinance: 시장 데이터
 - Gemini 2.5 Flash: 시장 코멘트
-- 매일 오전 7시 KST 텔레그램 전송
+- 매일 오전 7시 KST 텔레그램 전송 (평일만)
 """
 import os, re, datetime, requests
 import yfinance as yf
@@ -28,7 +28,6 @@ TICKER_LABELS = {
     "CL=F": "WTI유가", "GC=F": "국제금", "HG=F": "구리",
 }
 
-# 급등락 임계값 (%)
 ALERT_THRESHOLDS = {
     "^IRX": 5.0, "^TNX": 3.0, "^TYX": 3.0,
     "DX-Y.NYB": 1.0, "KRW=X": 1.0,
@@ -39,15 +38,12 @@ ALERT_THRESHOLDS = {
     "CL=F": 3.0, "GC=F": 2.0, "HG=F": 2.0,
 }
 DEFAULT_THRESHOLD = 2.0
-
-# 금리 지표 — bp(절대 변동) 표시
 RATE_TICKERS = {"^IRX", "^TNX", "^TYX"}
 
 
 # ── 데이터 수집 ───────────────────────────────────────────────────────────────
 
 def get_price(ticker: str) -> tuple:
-    """일반 지표: 직전 영업일 대비 변동률 반환"""
     try:
         hist = yf.Ticker(ticker).history(period="5d")
         close = hist["Close"].dropna()
@@ -63,41 +59,26 @@ def get_price(ticker: str) -> tuple:
 
 
 def get_rate(ticker: str) -> tuple:
-    """
-    금리 지표: 변동값을 bp(basis point)로 반환.
-    yfinance 금리 값은 % 단위(e.g. 4.25)이므로
-    절대 변동 = curr - prev (단위: %), bp = 절대변동 * 100
-    """
     try:
         hist = yf.Ticker(ticker).history(period="5d")
         close = hist["Close"].dropna()
         if len(close) < 2:
             return None, None
         curr, prev = float(close.iloc[-1]), float(close.iloc[-2])
-        bp_chg = (curr - prev) * 100  # bp
-        return curr, bp_chg
+        return curr, (curr - prev) * 100  # bp
     except Exception as e:
         print(f"[get_rate] {ticker}: {e}")
         return None, None
 
 
 def get_kr_index(ticker: str) -> tuple:
-    """
-    코스피/코스닥 딜레이 방지:
-    - period 루프 대신 start/end 날짜 명시로 Yahoo 캐시 문제 우회
-    - 최근 5 영업일치 데이터를 명시적으로 요청
-    """
     try:
         end   = datetime.date.today() + datetime.timedelta(days=1)
         start = end - datetime.timedelta(days=10)
         hist  = yf.Ticker(ticker).history(start=str(start), end=str(end))
         close = hist["Close"].dropna()
-
-        # 유효성 검사 (코스피 < 1500, 코스닥 < 400 이면 데이터 이상)
         min_valid = {"^KS11": 1500, "^KQ11": 400}
-        threshold = min_valid.get(ticker, 0)
-        close = close[close > threshold]
-
+        close = close[close > min_valid.get(ticker, 0)]
         if len(close) < 2:
             return None, None
         curr, prev = float(close.iloc[-1]), float(close.iloc[-2])
@@ -121,7 +102,6 @@ def fmt_pct(value, chg, decimals=2, comma=True) -> str:
 
 
 def fmt_bp(value, bp) -> str:
-    """금리 전용 포맷: 4.25% (+3bp 🔺)"""
     if value is None or bp is None:
         return "N/A"
     arrow = "🔺" if bp >= 0 else "▼"
@@ -140,16 +120,13 @@ def detect_anomalies(records: list[dict]) -> list[str]:
     for r in records:
         if r["chg"] is None:
             continue
-        threshold = ALERT_THRESHOLDS.get(r["ticker"], DEFAULT_THRESHOLD)
-        # 금리는 bp 기준이므로 % 임계값과 단위 맞춤 (bp는 별도 판단)
-        chg_abs = abs(r["chg"])
         if r["ticker"] in RATE_TICKERS:
-            # bp 기준: 10bp 이상이면 알림
-            if chg_abs >= 10:
+            if abs(r["chg"]) >= 10:
                 direction = "급등" if r["chg"] > 0 else "급락"
                 alerts.append(f"{r['label']} {direction} ({r['chg']:+.1f}bp)")
         else:
-            if chg_abs >= threshold:
+            threshold = ALERT_THRESHOLDS.get(r["ticker"], DEFAULT_THRESHOLD)
+            if abs(r["chg"]) >= threshold:
                 direction = "급등" if r["chg"] > 0 else "급락"
                 alerts.append(f"{r['label']} {direction} ({r['chg']:+.2f}%)")
     return alerts
@@ -205,9 +182,7 @@ def get_ai_commentary(market_data: str, anomalies: list[str]) -> str:
             contents=prompt,
             config=types.GenerateContentConfig(max_output_tokens=900, temperature=0.5),
         )
-        text = resp.text.strip()
-        # 연속 3줄 이상 공백 정리
-        return re.sub(r'\n{3,}', '\n\n', text)
+        return re.sub(r'\n{3,}', '\n\n', resp.text.strip())
     except Exception as e:
         print(f"Gemini 오류: {e}")
         return f"⚠️ AI 코멘트 생성 실패: {str(e)[:150]}"
@@ -215,13 +190,13 @@ def get_ai_commentary(market_data: str, anomalies: list[str]) -> str:
 
 # ── 대시보드 조립 ─────────────────────────────────────────────────────────────
 
-def build_dashboard() -> tuple[str, str]:
+def build_dashboard() -> str:
     kst_now  = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
     time_str = kst_now.strftime("%Y-%m-%d %H:%M:%S")
 
-    L       = []  # 텔레그램 HTML 라인
-    SL      = []  # Gemini 요약용 plain text
-    records = []  # 특이사항 감지용
+    L       = []
+    SL      = []
+    records = []
 
     def add(ticker: str, label: str, v, c, decimals=2, is_rate=False):
         if v is None or c is None:
@@ -234,18 +209,15 @@ def build_dashboard() -> tuple[str, str]:
     L.append(b("🌍 글로벌 매크로 대시보드"))
     L.append(f"🕒 기준 시각: {time_str} (KST)")
 
-    # 핵심 지표
     L.append(""); L.append(b("🔑 핵심 지표 (금리/달러)"))
     for ticker, label in [("^IRX", "🇺🇸 미국채 2년"), ("^TNX", "🇺🇸 미국채 10년"), ("^TYX", "🇺🇸 미국채 30년")]:
         add(ticker, label, *get_rate(ticker), is_rate=True)
     add("DX-Y.NYB", "💵 달러 인덱스", *get_price("DX-Y.NYB"))
 
-    # 환율
     L.append(""); L.append(b("💱 주요 환율 (FX)"))
     krw_v, krw_c = get_price("KRW=X")
     add("KRW=X", "🇰🇷 원/달러", krw_v, krw_c)
 
-    # 엔/원 계산 (오류 시 None 반환, 0으로 하드코딩하지 않음)
     jpy_v, _ = get_price("JPY=X")
     if krw_v and jpy_v:
         jpy_krw = krw_v / jpy_v
@@ -264,20 +236,17 @@ def build_dashboard() -> tuple[str, str]:
     add("EURUSD=X", "🇪🇺 유로/달러", *get_price("EURUSD=X"), decimals=4)
     add("CNY=X",    "🇨🇳 달러/위안", *get_price("CNY=X"),    decimals=4)
 
-    # 심리/코인
     L.append(""); L.append(b("📉 시장 심리 & 코인"))
     add("^VIX",    "😨 VIX",    *get_price("^VIX"))
     add("BTC-USD", "🪙 비트코인", *get_price("BTC-USD"), decimals=0)
     add("ETH-USD", "💎 이더리움", *get_price("ETH-USD"), decimals=0)
 
-    # 미국 선물
     L.append(""); L.append(b("🇺🇸 미국 지수 선물"))
     add("ES=F",  "S&P 500 선물",    *get_price("ES=F"),  decimals=0)
     add("YM=F",  "다우 존스 선물",  *get_price("YM=F"),  decimals=0)
     add("NQ=F",  "나스닥 100 선물", *get_price("NQ=F"),  decimals=0)
     add("RTY=F", "러셀 2000 선물",  *get_price("RTY=F"), decimals=0)
 
-    # 한국/아시아
     L.append(""); L.append(b("🌏 한국 & 아시아"))
     v, c = get_kr_index("^KS11")
     add("^KS11", "🇰🇷 코스피", v, c, decimals=0) if v else L.append("🇰🇷 코스피: 데이터 없음")
@@ -289,7 +258,6 @@ def build_dashboard() -> tuple[str, str]:
     add("000001.SS", "🇨🇳 상해 종합",       *get_price("000001.SS"), decimals=0)
     add("^HSI",      "🇭🇰 홍콩 항셍",       *get_price("^HSI"),      decimals=0)
 
-    # 원자재
     L.append(""); L.append(b("💢 원자재 & 귀금속"))
     add("CL=F", "🛢️ WTI 유가", *get_price("CL=F"))
     add("HG=F", "🏗️ 구리",     *get_price("HG=F"))
@@ -297,13 +265,11 @@ def build_dashboard() -> tuple[str, str]:
     add("SI=F", "🥈 국제 은",  *get_price("SI=F"))
     add("ZC=F", "🌽 옥수수",   *get_price("ZC=F"))
 
-    # 급등락 알림
     anomalies = detect_anomalies(records)
     if anomalies:
         L.append(""); L.append(b("⚡ 오늘의 급등락 알림"))
         L.extend(f"• {a}" for a in anomalies)
 
-    # AI 코멘트
     print("  → Gemini 코멘트 생성 중...")
     commentary = get_ai_commentary("\n".join(SL), anomalies)
 
@@ -312,12 +278,12 @@ def build_dashboard() -> tuple[str, str]:
         stripped = line.strip()
         ai_lines.append(b(stripped) if stripped.startswith("[섹션") else stripped)
 
-    return "\n".join(L), "\n".join(ai_lines)
+    return "\n".join(L) + "\n\n" + "\n".join(ai_lines)
 
 
 # ── Telegram 전송 ─────────────────────────────────────────────────────────────
 
-def split_chunks(text: str, limit: int = 3800) -> list[str]:
+def split_chunks(text: str, limit: int = 4096) -> list[str]:
     chunks, current = [], ""
     for line in text.split("\n"):
         candidate = f"{current}\n{line}" if current else line
@@ -354,14 +320,10 @@ def send_telegram(text: str):
 
 def main():
     print("대시보드 생성 중...")
-    indicators_msg, ai_msg = build_dashboard()
-    print(indicators_msg)
-    print("\n--- AI 코멘트 ---")
-    print(ai_msg)
+    msg = build_dashboard()
+    print(msg)
     print("\n텔레그램 전송 중...")
-    send_telegram(indicators_msg)
-    if ai_msg:
-        send_telegram(ai_msg)
+    send_telegram(msg)
     print("✅ 완료")
 
 
