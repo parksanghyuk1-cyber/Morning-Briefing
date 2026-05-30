@@ -1,405 +1,138 @@
-"""
-us_market.py v3
-────────────────
-미국 시장 아침 브리핑
-- 주요 지수 + 필라델피아 반도체
-- 리스크온/오프 신호등
-- 섹터 Top5 / Bottom5
-- 빅테크 개별 등락
-- 특징주 (yfinance 수치 + Gemini 해설)
-- 공포탐욕지수 + VIX
-매일 오전 7시 KST (평일)
-"""
+"""us_market.py v3 - 미국 시장 아침 브리핑 (매일 07:00 KST)"""
 
-import os
-import re
-import json
-import datetime
-import requests
+import os, re, json, datetime, requests
 import yfinance as yf
 from google import genai
 from google.genai import types
 
+# ── 설정 ──────────────────────────────────
+INDICES  = [("S&P500","^GSPC"),("나스닥","^IXIC"),("다우","^DJI"),("러셀2000","^RUT"),("필라델피아반도체","^SOX")]
+SECTORS  = {"기술":"XLK","임의소비재":"XLY","에너지":"XLE","금융":"XLF","헬스케어":"XLV","산업재":"XLI","소재":"XLB","필수소비재":"XLP","부동산":"XLRE","유틸리티":"XLU","커뮤니케이션":"XLC"}
+BIGTECH  = [("엔비디아","NVDA"),("애플","AAPL"),("마이크로소프트","MSFT"),("메타","META"),("아마존","AMZN"),("테슬라","TSLA"),("알파벳","GOOGL"),("TSMC","TSM"),("브로드컴","AVGO"),("AMD","AMD")]
 
-# ─────────────────────────────────────────
-# 유틸
-# ─────────────────────────────────────────
-
-def pct(curr, prev):
-    return (curr - prev) / prev * 100
+# ── 공통 ──────────────────────────────────
+def get_price(ticker):
+    try:
+        h = yf.Ticker(ticker).history(period="5d")
+        if len(h) < 2 or h.index[-1].date() == h.index[-2].date(): return None, None
+        c, p = float(h["Close"].iloc[-1]), float(h["Close"].iloc[-2])
+        return c, (c - p) / p * 100
+    except: return None, None
 
 def fmt(v, c):
-    arrow = "🔺" if c >= 0 else "🔻"
-    return f"{v:,.2f} ({'+' if c>=0 else ''}{c:.2f}% {arrow})"
+    return f"{v:,.2f} ({'+' if c>=0 else ''}{c:.2f}% {'🔺' if c>=0 else '🔻'})"
 
-
-def call_gemini(prompt: str, max_tokens: int = 1200, temperature: float = 0.3) -> str:
-    """Gemini 2.5 Flash API 호출"""
+def call_gemini(prompt, max_tokens=1200, temperature=0.3):
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            max_output_tokens=max_tokens,
-            temperature=temperature,
-        ),
-    )
-    return response.text.strip()
+    return client.models.generate_content(
+        model="gemini-2.5-flash", contents=prompt,
+        config=types.GenerateContentConfig(max_output_tokens=max_tokens, temperature=temperature)
+    ).text.strip()
 
+# ── 섹션별 데이터 ──────────────────────────
+def get_risk_signal():
+    data = {k: get_price(t) for k, t in [("nasdaq","^IXIC"),("vix","^VIX"),("dollar","DX-Y.NYB"),("bond","^TNX"),("gold","GC=F")]}
+    s = sum([
+        (data["nasdaq"][1] or 0)  >  0,
+        (data["vix"][1]    or 0)  <  0,
+        (data["dollar"][1] or 0)  <  0,
+        (data["gold"][1]   or 0)  <  0,
+        -((data["bond"][1] or 0)  >  0),
+    ])
+    if   s >= 3: sig, desc = "🟢 리스크온",  "나스닥↑ VIX↓ 달러↓ - 위험자산 선호"
+    elif s <= 1: sig, desc = "🔴 리스크오프", "안전자산 수요↑ 위험자산 회피"
+    else:        sig, desc = "🟡 혼조",       "방향성 불명확, 선별적 접근"
+    return sig, desc, data["bond"]
 
-def get_price(ticker: str) -> tuple[float | None, float | None]:
-    """yfinance로 직전 종가 및 등락률 반환. 날짜 검증 포함."""
+def get_fear_greed():
     try:
-        hist = yf.Ticker(ticker).history(period="5d")
-        if len(hist) < 2:
-            return None, None
-        # 가장 최근 두 거래일이 실제로 다른 날짜인지 확인
-        last_date  = hist.index[-1].date()
-        prev_date  = hist.index[-2].date()
-        if last_date == prev_date:
-            return None, None
-        curr = float(hist["Close"].iloc[-1])
-        prev = float(hist["Close"].iloc[-2])
-        return curr, pct(curr, prev)
-    except Exception:
-        return None, None
+        d = requests.get("https://api.alternative.me/fng/?limit=2", timeout=10).json()["data"]
+        v, p = int(d[0]["value"]), int(d[1]["value"])
+        emoji = "😍" if v>=75 else "😊" if v>=55 else "😐" if v>=45 else "😨" if v>=25 else "😱"
+        diff  = v - p
+        return f"{emoji} {v} ({d[0]['value_classification']}) ({'↑' if diff>0 else '↓'}{abs(diff)})"
+    except: return "N/A"
 
+def pick_stocks(kst_date):
+    prompt = f"""오늘은 {kst_date}입니다. 미국 증시 기준 최근 주목받은 종목을 아래 JSON으로만 응답하세요. 다른 텍스트 절대 금지.
+[{{"ticker":"NVDA","name":"엔비디아","desc":"AI GPU","reason":"블랙웰 수요 급증으로 가이던스 상향"}}]
+규칙: 7~10개, 상승/하락 혼합, reason은 구체적 수치/이벤트 포함 명사형, 확실한 종목만"""
+    try:
+        raw = call_gemini(prompt, max_tokens=800, temperature=0.1)
+        m   = re.search(r'\[.*\]', raw, re.DOTALL)
+        if not m: return []
+        return [(d["ticker"], d.get("name",""), d.get("desc",""), d.get("reason","")) for d in json.loads(m.group())]
+    except: return []
 
-# ─────────────────────────────────────────
-# 1. 주요 지수
-# ─────────────────────────────────────────
-
-def get_indices() -> list[tuple[str, float, float]]:
-    items = [
-        ("S&P500",         "^GSPC"),
-        ("나스닥",          "^IXIC"),
-        ("다우",            "^DJI"),
-        ("러셀2000",        "^RUT"),
-        ("필라델피아반도체", "^SOX"),
-    ]
+def verify_stocks(picks):
     result = []
-    for name, ticker in items:
-        v, c = get_price(ticker)
-        if v is not None:
-            result.append((name, v, c))
-    return result
-
-
-# ─────────────────────────────────────────
-# 2. 리스크온/오프 신호등
-# ─────────────────────────────────────────
-
-def get_risk_signal() -> tuple[str, str, dict]:
-    signals = {}
-
-    _, c = get_price("^IXIC")
-    if c is not None:
-        signals["nasdaq"] = c
-
-    v, c = get_price("^VIX")
-    if v is not None:
-        signals["vix_level"] = v
-        signals["vix_chg"]   = c
-
-    _, c = get_price("DX-Y.NYB")
-    if c is not None:
-        signals["dollar"] = c
-
-    v, c = get_price("^TNX")
-    if v is not None:
-        signals["bond_yield"] = v
-        signals["bond_chg"]   = c
-
-    _, c = get_price("GC=F")
-    if c is not None:
-        signals["gold"] = c
-
-    score = 0
-    if signals.get("nasdaq", 0)   >  0: score += 1
-    if signals.get("vix_chg", 0)  <  0: score += 1
-    if signals.get("dollar", 0)   <  0: score += 1
-    if signals.get("gold", 0)     <  0: score += 1
-    if signals.get("bond_chg", 0) >  0: score -= 1
-
-    if   score >= 3: signal, desc = "🟢 리스크온",  "나스닥↑ VIX↓ 달러↓ - 위험자산 선호"
-    elif score <= 1: signal, desc = "🔴 리스크오프", "안전자산 수요↑ 위험자산 회피"
-    else:            signal, desc = "🟡 혼조",       "방향성 불명확, 선별적 접근"
-
-    return signal, desc, signals
-
-
-# ─────────────────────────────────────────
-# 3. 섹터 ETF
-# ─────────────────────────────────────────
-
-SECTOR_ETFS = {
-    "기술":        "XLK",
-    "임의소비재":   "XLY",
-    "에너지":      "XLE",
-    "금융":        "XLF",
-    "헬스케어":    "XLV",
-    "산업재":      "XLI",
-    "소재":        "XLB",
-    "필수소비재":   "XLP",
-    "부동산":      "XLRE",
-    "유틸리티":    "XLU",
-    "커뮤니케이션": "XLC",
-}
-
-def get_sectors() -> list[tuple[str, float]]:
-    results = []
-    for name, ticker in SECTOR_ETFS.items():
-        _, c = get_price(ticker)
-        if c is not None:
-            results.append((name, c))
-    results.sort(key=lambda x: x[1], reverse=True)
-    return results
-
-
-# ─────────────────────────────────────────
-# 4. 빅테크
-# ─────────────────────────────────────────
-
-BIGTECH = [
-    ("엔비디아",       "NVDA"),
-    ("애플",           "AAPL"),
-    ("마이크로소프트", "MSFT"),
-    ("메타",           "META"),
-    ("아마존",         "AMZN"),
-    ("테슬라",         "TSLA"),
-    ("알파벳",         "GOOGL"),
-    ("TSMC",           "TSM"),
-    ("브로드컴",       "AVGO"),
-    ("AMD",            "AMD"),
-]
-
-def get_bigtech() -> list[tuple[str, float]]:
-    results = []
-    for name, ticker in BIGTECH:
-        _, c = get_price(ticker)
-        if c is not None:
-            results.append((name, c))
-    return results
-
-
-# ─────────────────────────────────────────
-# 5. 특징주 - Gemini가 종목 선정 → yfinance로 수치 검증
-# ─────────────────────────────────────────
-
-def gemini_pick_tickers(kst_date: str) -> list[tuple[str, str, str, str]]:
-    """
-    Gemini에게 오늘 날짜 기준 주목할 종목 선정 요청.
-    반환: [(ticker, name, desc, reason), ...]
-    """
-    prompt = f"""오늘은 {kst_date}입니다. 미국 증시 기준 어제 또는 최근 며칠간
-실적 발표, 가이던스 변경, 대형 뉴스, 급등락, 거래량 급증 등으로
-주목받은 종목을 골라주세요.
-
-반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트 절대 금지:
-[
-  {{"ticker": "NVDA", "name": "엔비디아", "desc": "AI GPU 설계", "reason": "블랙웰 수요 급증으로 실적 가이던스 상향"}},
-  {{"ticker": "INTC", "name": "인텔", "desc": "CPU/파운드리", "reason": "파운드리 사업부 분기 손실 지속으로 투자심리 악화"}}
-]
-
-규칙:
-- 종목 수: 7~10개 (상승/하락 혼합)
-- ticker는 미국 증시 실제 티커 심볼
-- reason은 구체적 수치/이벤트 포함, 명사형으로 끝낼 것
-- 확실히 아는 종목만 포함 (모르면 생략)
-- JSON 외 텍스트 절대 불가"""
-
-    try:
-        raw   = call_gemini(prompt, max_tokens=800, temperature=0.1)
-        match = re.search(r'\[.*\]', raw, re.DOTALL)
-        if not match:
-            return []
-        data = json.loads(match.group())
-        return [
-            (d["ticker"], d.get("name", ""), d.get("desc", ""), d.get("reason", ""))
-            for d in data
-        ]
-    except Exception:
-        return []
-
-
-def verify_with_yfinance(picks: list[tuple[str, str, str, str]]) -> list[dict]:
-    """
-    Gemini가 선정한 종목을 yfinance로 실제 수치 검증.
-    수치 조회 실패 종목은 제외.
-    """
-    verified = []
     for ticker, name, desc, reason in picks:
         v, c = get_price(ticker)
-        if v is None:
-            continue
+        if v is None: continue
         try:
-            hist      = yf.Ticker(ticker).history(period="10d")
-            vol_today = float(hist["Volume"].iloc[-1])
-            vol_avg   = float(hist["Volume"].iloc[-6:-1].mean())
-            vol_ratio = vol_today / vol_avg if vol_avg > 0 else 1.0
-        except Exception:
-            vol_ratio = 1.0
+            h = yf.Ticker(ticker).history(period="10d")
+            vol_ratio = float(h["Volume"].iloc[-1]) / float(h["Volume"].iloc[-6:-1].mean())
+        except: vol_ratio = 1.0
+        result.append({"ticker":ticker,"name":name,"desc":desc,"reason":reason,"chg":c,"vol_ratio":vol_ratio})
+    return result
 
-        verified.append({
-            "ticker":    ticker,
-            "name":      name,
-            "desc":      desc,
-            "reason":    reason,
-            "price":     v,
-            "chg":       c,
-            "vol_ratio": vol_ratio,
-        })
-    return verified
+# ── 메시지 조립 ────────────────────────────
+def build_message():
+    kst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
+    L   = [f"🌅 *미국 시장 브리핑* - {kst.strftime('%Y-%m-%d')}", "━━━━━━━━━━━━━━━━━━━━"]
 
-
-# ─────────────────────────────────────────
-# 6. 공포탐욕 + VIX
-# ─────────────────────────────────────────
-
-def get_fear_greed() -> str:
-    try:
-        data  = requests.get(
-            "https://api.alternative.me/fng/?limit=2", timeout=10
-        ).json()["data"]
-        val   = int(data[0]["value"])
-        prev  = int(data[1]["value"])
-        label = data[0]["value_classification"]
-        diff  = val - prev
-
-        if   val >= 75: emoji = "😍"
-        elif val >= 55: emoji = "😊"
-        elif val >= 45: emoji = "😐"
-        elif val >= 25: emoji = "😨"
-        else:           emoji = "😱"
-
-        trend = f"({'↑' if diff > 0 else '↓'}{abs(diff)})" if diff else "(변동없음)"
-        return f"{emoji} {val} ({label}) {trend}"
-    except Exception:
-        return "N/A"
-
-
-# ─────────────────────────────────────────
-# 7. 메시지 조립
-# ─────────────────────────────────────────
-
-def build_message() -> str:
-    kst      = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
-    date_str = kst.strftime("%Y-%m-%d")
-
-    L = []
-    L.append(f"🌅 *미국 시장 브리핑* - {date_str}")
-    L.append("━━━━━━━━━━━━━━━━━━━━")
-
-    # ── 주요 지수 ──
     L.append("📊 *주요 지수*")
-    for name, v, c in get_indices():
-        L.append(f"🔸 {name}: {fmt(v, c)}")
+    for name, t in INDICES:
+        v, c = get_price(t)
+        if v: L.append(f"🔸 {name}: {fmt(v, c)}")
 
-    # ── 리스크 신호 ──
-    L.append("")
-    signal, desc, raw = get_risk_signal()
-    L.append(f"*시장 신호: {signal}*")
-    L.append(f"└ {desc}")
-    if raw.get("bond_yield"):
-        L.append(
-            f"└ 미국10년채 {raw['bond_yield']:.2f}% "
-            f"({'+' if raw.get('bond_chg', 0) >= 0 else ''}{raw.get('bond_chg', 0):.2f}%)"
-        )
+    sig, desc, bond = get_risk_signal()
+    L += ["", f"*시장 신호: {sig}*", f"└ {desc}"]
+    if bond[0]: L.append(f"└ 미국10년채 {bond[0]:.2f}% ({'+' if bond[1]>=0 else ''}{bond[1]:.2f}%)")
 
-    # ── 섹터 ──
-    L.append("")
-    L.append("📂 *섹터 등락*")
-    sectors = get_sectors()
-    if sectors:
-        L.append("🏆 Top 5")
-        for name, c in sectors[:5]:
-            L.append(f"  {'+' if c >= 0 else ''}{c:.2f}%  {name}")
-        L.append("💀 Bottom 5")
-        for name, c in sectors[-5:]:
-            L.append(f"  {c:.2f}%  {name}")
+    sectors = sorted([(n, get_price(t)[1]) for n, t in SECTORS.items() if get_price(t)[1] is not None], key=lambda x: x[1], reverse=True)
+    L += ["", "📂 *섹터 등락*", "🏆 Top 5"]
+    for n, c in sectors[:5]:  L.append(f"  {'+' if c>=0 else ''}{c:.2f}%  {n}")
+    L.append("💀 Bottom 5")
+    for n, c in sectors[-5:]: L.append(f"  {c:.2f}%  {n}")
 
-    # ── 빅테크 ──
-    L.append("")
-    L.append("💻 *빅테크*")
-    tech = get_bigtech()
-    row  = []
-    for name, c in tech:
-        row.append(f"{name} {'▲' if c >= 0 else '▼'}{abs(c):.1f}%")
-        if len(row) == 2:
-            L.append("  " + "   |   ".join(row))
-            row = []
-    if row:
-        L.append("  " + row[0])
+    L += ["", "💻 *빅테크*"]
+    row = []
+    for name, t in BIGTECH:
+        _, c = get_price(t)
+        if c is None: continue
+        row.append(f"{name} {'▲' if c>=0 else '▼'}{abs(c):.1f}%")
+        if len(row) == 2: L.append("  " + "   |   ".join(row)); row = []
+    if row: L.append("  " + row[0])
 
-    # ── 특징주 ──
-    L.append("")
-    L.append("⭐ *특징주*")
-    kst_date = kst.strftime("%Y년 %m월 %d일")
-    picks    = gemini_pick_tickers(kst_date)
-    stocks   = verify_with_yfinance(picks)
+    L += ["", "⭐ *특징주*"]
+    for s in verify_stocks(pick_stocks(kst.strftime("%Y년 %m월 %d일"))):
+        vol = f"  _(거래량 {s['vol_ratio']:.1f}배)_" if s["vol_ratio"] >= 2.0 else ""
+        L.append(f"{'🔺' if s['chg']>=0 else '🔻'} *{s['ticker']}* ({s['name']}) {'+' if s['chg']>=0 else ''}{s['chg']:.1f}%  _{s['desc']}_{vol}")
+        if s["reason"]: L.append(f"   └ {s['reason']}")
 
-    if stocks:
-        for s in stocks:
-            arrow   = "🔺" if s["chg"] >= 0 else "🔻"
-            vol_str = f"  _(거래량 {s['vol_ratio']:.1f}배)_" if s["vol_ratio"] >= 2.0 else ""
-            L.append(
-                f"{arrow} *{s['ticker']}* ({s['name']}) "
-                f"{'+' if s['chg'] >= 0 else ''}{s['chg']:.1f}%  "
-                f"_{s['desc']}_{vol_str}"
-            )
-            if s["reason"]:
-                L.append(f"   └ {s['reason']}")
-    else:
-        L.append("  데이터 수집 실패")
-
-    # ── 심리 지표 ──
-    L.append("")
-    L.append("🧠 *심리 지표*")
-    L.append(f"공포탐욕지수: {get_fear_greed()}")
     v, c = get_price("^VIX")
-    if v is not None:
-        zone = "안정" if v < 15 else "경계" if v < 20 else "위험" if v < 30 else "패닉"
-        L.append(
-            f"VIX: {v:.2f} ({'+' if c >= 0 else ''}{c:.2f}%) → {zone} 구간"
-        )
+    zone = "안정" if v and v<15 else "경계" if v and v<20 else "위험" if v and v<30 else "패닉"
+    L += ["", "🧠 *심리 지표*", f"공포탐욕지수: {get_fear_greed()}"]
+    if v: L.append(f"VIX: {v:.2f} ({'+' if c>=0 else ''}{c:.2f}%) → {zone} 구간")
 
-    L.append("")
-    L.append(f"🕒 _{kst.strftime('%H:%M')} KST_")
+    L += ["", f"🕒 _{kst.strftime('%H:%M')} KST_"]
     return "\n".join(L)
 
-
-# ─────────────────────────────────────────
-# 8. Telegram 전송
-# ─────────────────────────────────────────
-
-def send_telegram(text: str) -> None:
-    token   = os.environ["TELEGRAM_TOKEN"]
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]
+# ── Telegram 전송 ──────────────────────────
+def send_telegram(text):
+    token, chat_id = os.environ["TELEGRAM_TOKEN"], os.environ["TELEGRAM_CHAT_ID"]
     for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
-        resp = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown"},
-            timeout=15,
-        )
-        if not resp.ok:
-            requests.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": chunk},
-                timeout=15,
-            )
+        r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown"}, timeout=15)
+        if not r.ok:
+            requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": chunk}, timeout=15)
 
-
-# ─────────────────────────────────────────
-# 9. 메인
-# ─────────────────────────────────────────
-
-def main():
+# ── 메인 ──────────────────────────────────
+if __name__ == "__main__":
     print("미국 시장 브리핑 생성 중...")
     msg = build_message()
     print(msg)
     send_telegram(msg)
     print("✅ 완료")
-
-
-if __name__ == "__main__":
-    main()
