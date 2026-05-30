@@ -1,7 +1,7 @@
 name: US Market Morning Briefing
 
 on:
-  schedule:
+  schedue:
     - cron: '0 22 * * 1-5'   # 평일 오전 7시 KST
   workflow_dispatch:
 
