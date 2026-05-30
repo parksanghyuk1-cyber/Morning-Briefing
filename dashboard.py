@@ -180,7 +180,7 @@ def get_ai_commentary(market_data: str, anomalies: list[str]) -> str:
         resp = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
-            config=types.GenerateContentConfig(max_output_tokens=900, temperature=0.5),
+            config=types.GenerateContentConfig(max_output_tokens=8192, temperature=0.5),
         )
         return re.sub(r'\n{3,}', '\n\n', resp.text.strip())
     except Exception as e:
