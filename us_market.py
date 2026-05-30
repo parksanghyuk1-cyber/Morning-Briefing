@@ -59,6 +59,7 @@ def pick_stocks(kst_date):
 규칙: 7~10개, 상승/하락 혼합, reason은 구체적 수치/이벤트 포함 명사형, 확실한 종목만"""
     try:
         raw = call_gemini(prompt, max_tokens=800, temperature=0.1)
+        raw = re.sub(r'```(?:json)?|```', '', raw).strip()  # 코드블록 제거
         m   = re.search(r'\[.*\]', raw, re.DOTALL)
         if not m: return []
         return [(d["ticker"], d.get("name",""), d.get("desc",""), d.get("reason","")) for d in json.loads(m.group())]
@@ -79,7 +80,7 @@ def verify_stocks(picks):
 # ── 메시지 조립 ────────────────────────────
 def build_message():
     kst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
-    L   = [f"🌅 *미국 시장 브리핑* - {kst.strftime('%Y-%m-%d')}", "━━━━━━━━━━━━━━━━━━━━"]
+    L   = [f"🌅 *미국 시장 브리핑* - {kst.strftime('%Y-%m-%d %H:%M')} KST", "━━━━━━━━━━━━━━━━━━━━"]
 
     L.append("📊 *주요 지수*")
     for name, t in INDICES:
@@ -116,7 +117,6 @@ def build_message():
     L += ["", "🧠 *심리 지표*", f"공포탐욕지수: {get_fear_greed()}"]
     if v: L.append(f"VIX: {v:.2f} ({'+' if c>=0 else ''}{c:.2f}%) → {zone} 구간")
 
-    L += ["", f"🕒 _{kst.strftime('%H:%M')} KST_"]
     return "\n".join(L)
 
 # ── Telegram 전송 ──────────────────────────
