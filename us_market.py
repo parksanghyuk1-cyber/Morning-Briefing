@@ -1,20 +1,24 @@
 """
-us_market.py v2
+us_market.py v3
 ────────────────
 미국 시장 아침 브리핑
 - 주요 지수 + 필라델피아 반도체
 - 리스크온/오프 신호등
-- 섹터 Top3 / Bottom3
+- 섹터 Top5 / Bottom5
 - 빅테크 개별 등락
-- 특징주 (yfinance 수치 + Groq 해설)
+- 특징주 (yfinance 수치 + Gemini 해설)
 - 공포탐욕지수 + VIX
 매일 오전 7시 KST (평일)
 """
 
 import os
+import re
+import json
 import datetime
 import requests
 import yfinance as yf
+from google import genai
+from google.genai import types
 
 
 # ─────────────────────────────────────────
@@ -30,12 +34,10 @@ def fmt(v, c):
 
 
 def call_gemini(prompt: str, max_tokens: int = 1200, temperature: float = 0.3) -> str:
-    """Gemini 2.0 Flash API 호출 (무료)"""
-    from google import genai
-    from google.genai import types
+    """Gemini 2.5 Flash API 호출"""
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     response = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         contents=prompt,
         config=types.GenerateContentConfig(
             max_output_tokens=max_tokens,
@@ -44,10 +46,17 @@ def call_gemini(prompt: str, max_tokens: int = 1200, temperature: float = 0.3) -
     )
     return response.text.strip()
 
-def get_price(ticker):
+
+def get_price(ticker: str) -> tuple[float | None, float | None]:
+    """yfinance로 직전 종가 및 등락률 반환. 날짜 검증 포함."""
     try:
         hist = yf.Ticker(ticker).history(period="5d")
         if len(hist) < 2:
+            return None, None
+        # 가장 최근 두 거래일이 실제로 다른 날짜인지 확인
+        last_date  = hist.index[-1].date()
+        prev_date  = hist.index[-2].date()
+        if last_date == prev_date:
             return None, None
         curr = float(hist["Close"].iloc[-1])
         prev = float(hist["Close"].iloc[-2])
@@ -60,7 +69,7 @@ def get_price(ticker):
 # 1. 주요 지수
 # ─────────────────────────────────────────
 
-def get_indices():
+def get_indices() -> list[tuple[str, float, float]]:
     items = [
         ("S&P500",         "^GSPC"),
         ("나스닥",          "^IXIC"),
@@ -71,7 +80,7 @@ def get_indices():
     result = []
     for name, ticker in items:
         v, c = get_price(ticker)
-        if v:
+        if v is not None:
             result.append((name, v, c))
     return result
 
@@ -80,23 +89,30 @@ def get_indices():
 # 2. 리스크온/오프 신호등
 # ─────────────────────────────────────────
 
-def get_risk_signal():
+def get_risk_signal() -> tuple[str, str, dict]:
     signals = {}
 
     _, c = get_price("^IXIC")
-    if c is not None: signals["nasdaq"] = c
+    if c is not None:
+        signals["nasdaq"] = c
 
     v, c = get_price("^VIX")
-    if v is not None: signals["vix_level"] = v; signals["vix_chg"] = c
+    if v is not None:
+        signals["vix_level"] = v
+        signals["vix_chg"]   = c
 
     _, c = get_price("DX-Y.NYB")
-    if c is not None: signals["dollar"] = c
+    if c is not None:
+        signals["dollar"] = c
 
     v, c = get_price("^TNX")
-    if v is not None: signals["bond_yield"] = v; signals["bond_chg"] = c
+    if v is not None:
+        signals["bond_yield"] = v
+        signals["bond_chg"]   = c
 
     _, c = get_price("GC=F")
-    if c is not None: signals["gold"] = c
+    if c is not None:
+        signals["gold"] = c
 
     score = 0
     if signals.get("nasdaq", 0)   >  0: score += 1
@@ -105,7 +121,7 @@ def get_risk_signal():
     if signals.get("gold", 0)     <  0: score += 1
     if signals.get("bond_chg", 0) >  0: score -= 1
 
-    if   score >= 3: signal, desc = "🟢 리스크온",  "나스닥↑ VIX↓ 달러↓ — 위험자산 선호"
+    if   score >= 3: signal, desc = "🟢 리스크온",  "나스닥↑ VIX↓ 달러↓ - 위험자산 선호"
     elif score <= 1: signal, desc = "🔴 리스크오프", "안전자산 수요↑ 위험자산 회피"
     else:            signal, desc = "🟡 혼조",       "방향성 불명확, 선별적 접근"
 
@@ -117,20 +133,20 @@ def get_risk_signal():
 # ─────────────────────────────────────────
 
 SECTOR_ETFS = {
-    "기술":       "XLK",
-    "임의소비재":  "XLY",
-    "에너지":     "XLE",
-    "금융":       "XLF",
-    "헬스케어":   "XLV",
-    "산업재":     "XLI",
-    "소재":       "XLB",
-    "필수소비재":  "XLP",
-    "부동산":     "XLRE",
-    "유틸리티":   "XLU",
+    "기술":        "XLK",
+    "임의소비재":   "XLY",
+    "에너지":      "XLE",
+    "금융":        "XLF",
+    "헬스케어":    "XLV",
+    "산업재":      "XLI",
+    "소재":        "XLB",
+    "필수소비재":   "XLP",
+    "부동산":      "XLRE",
+    "유틸리티":    "XLU",
     "커뮤니케이션": "XLC",
 }
 
-def get_sectors():
+def get_sectors() -> list[tuple[str, float]]:
     results = []
     for name, ticker in SECTOR_ETFS.items():
         _, c = get_price(ticker)
@@ -157,7 +173,7 @@ BIGTECH = [
     ("AMD",            "AMD"),
 ]
 
-def get_bigtech():
+def get_bigtech() -> list[tuple[str, float]]:
     results = []
     for name, ticker in BIGTECH:
         _, c = get_price(ticker)
@@ -167,13 +183,13 @@ def get_bigtech():
 
 
 # ─────────────────────────────────────────
-# 5. 특징주 — Groq가 종목 선정 → yfinance로 수치 검증
+# 5. 특징주 - Gemini가 종목 선정 → yfinance로 수치 검증
 # ─────────────────────────────────────────
 
-def groq_pick_tickers(kst_date: str) -> list[tuple[str, str]]:
+def gemini_pick_tickers(kst_date: str) -> list[tuple[str, str, str, str]]:
     """
-    Groq에게 오늘 날짜 기준 주목할 종목 선정 요청.
-    반환: [(ticker, 기업설명), ...]
+    Gemini에게 오늘 날짜 기준 주목할 종목 선정 요청.
+    반환: [(ticker, name, desc, reason), ...]
     """
     prompt = f"""오늘은 {kst_date}입니다. 미국 증시 기준 어제 또는 최근 며칠간
 실적 발표, 가이던스 변경, 대형 뉴스, 급등락, 거래량 급증 등으로
@@ -193,31 +209,31 @@ def groq_pick_tickers(kst_date: str) -> list[tuple[str, str]]:
 - JSON 외 텍스트 절대 불가"""
 
     try:
-        raw = call_gemini(prompt, max_tokens=800, temperature=0.1)
-        # JSON 배열 추출
+        raw   = call_gemini(prompt, max_tokens=800, temperature=0.1)
         match = re.search(r'\[.*\]', raw, re.DOTALL)
         if not match:
             return []
         data = json.loads(match.group())
-        return [(d["ticker"], d.get("name",""), d.get("desc",""), d.get("reason","")) for d in data]
+        return [
+            (d["ticker"], d.get("name", ""), d.get("desc", ""), d.get("reason", ""))
+            for d in data
+        ]
     except Exception:
         return []
 
 
-def verify_with_yfinance(picks: list) -> list[dict]:
+def verify_with_yfinance(picks: list[tuple[str, str, str, str]]) -> list[dict]:
     """
-    Groq가 선정한 종목을 yfinance로 실제 수치 검증.
+    Gemini가 선정한 종목을 yfinance로 실제 수치 검증.
     수치 조회 실패 종목은 제외.
     """
     verified = []
-    for item in picks:
-        ticker, name, desc, reason = item
+    for ticker, name, desc, reason in picks:
         v, c = get_price(ticker)
         if v is None:
             continue
-        # 거래량 급증 여부
         try:
-            hist = yf.Ticker(ticker).history(period="10d")
+            hist      = yf.Ticker(ticker).history(period="10d")
             vol_today = float(hist["Volume"].iloc[-1])
             vol_avg   = float(hist["Volume"].iloc[-6:-1].mean())
             vol_ratio = vol_today / vol_avg if vol_avg > 0 else 1.0
@@ -240,9 +256,9 @@ def verify_with_yfinance(picks: list) -> list[dict]:
 # 6. 공포탐욕 + VIX
 # ─────────────────────────────────────────
 
-def get_fear_greed():
+def get_fear_greed() -> str:
     try:
-        data = requests.get(
+        data  = requests.get(
             "https://api.alternative.me/fng/?limit=2", timeout=10
         ).json()["data"]
         val   = int(data[0]["value"])
@@ -256,7 +272,7 @@ def get_fear_greed():
         elif val >= 25: emoji = "😨"
         else:           emoji = "😱"
 
-        trend = f"({'↑' if diff>0 else '↓'}{abs(diff)})" if diff else "(변동없음)"
+        trend = f"({'↑' if diff > 0 else '↓'}{abs(diff)})" if diff else "(변동없음)"
         return f"{emoji} {val} ({label}) {trend}"
     except Exception:
         return "N/A"
@@ -266,12 +282,12 @@ def get_fear_greed():
 # 7. 메시지 조립
 # ─────────────────────────────────────────
 
-def build_message():
+def build_message() -> str:
     kst      = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
     date_str = kst.strftime("%Y-%m-%d")
 
     L = []
-    L.append(f"🌅 *미국 시장 브리핑* — {date_str}")
+    L.append(f"🌅 *미국 시장 브리핑* - {date_str}")
     L.append("━━━━━━━━━━━━━━━━━━━━")
 
     # ── 주요 지수 ──
@@ -287,7 +303,7 @@ def build_message():
     if raw.get("bond_yield"):
         L.append(
             f"└ 미국10년채 {raw['bond_yield']:.2f}% "
-            f"({'+' if raw.get('bond_chg',0)>=0 else ''}{raw.get('bond_chg',0):.2f}%)"
+            f"({'+' if raw.get('bond_chg', 0) >= 0 else ''}{raw.get('bond_chg', 0):.2f}%)"
         )
 
     # ── 섹터 ──
@@ -297,7 +313,7 @@ def build_message():
     if sectors:
         L.append("🏆 Top 5")
         for name, c in sectors[:5]:
-            L.append(f"  {'+' if c>=0 else ''}{c:.2f}%  {name}")
+            L.append(f"  {'+' if c >= 0 else ''}{c:.2f}%  {name}")
         L.append("💀 Bottom 5")
         for name, c in sectors[-5:]:
             L.append(f"  {c:.2f}%  {name}")
@@ -308,7 +324,7 @@ def build_message():
     tech = get_bigtech()
     row  = []
     for name, c in tech:
-        row.append(f"{name} {'▲' if c>=0 else '▼'}{abs(c):.1f}%")
+        row.append(f"{name} {'▲' if c >= 0 else '▼'}{abs(c):.1f}%")
         if len(row) == 2:
             L.append("  " + "   |   ".join(row))
             row = []
@@ -319,16 +335,16 @@ def build_message():
     L.append("")
     L.append("⭐ *특징주*")
     kst_date = kst.strftime("%Y년 %m월 %d일")
-    picks    = groq_pick_tickers(kst_date)
+    picks    = gemini_pick_tickers(kst_date)
     stocks   = verify_with_yfinance(picks)
 
     if stocks:
         for s in stocks:
-            arrow = "🔺" if s["chg"] >= 0 else "🔻"
+            arrow   = "🔺" if s["chg"] >= 0 else "🔻"
             vol_str = f"  _(거래량 {s['vol_ratio']:.1f}배)_" if s["vol_ratio"] >= 2.0 else ""
             L.append(
                 f"{arrow} *{s['ticker']}* ({s['name']}) "
-                f"{'+' if s['chg']>=0 else ''}{s['chg']:.1f}%  "
+                f"{'+' if s['chg'] >= 0 else ''}{s['chg']:.1f}%  "
                 f"_{s['desc']}_{vol_str}"
             )
             if s["reason"]:
@@ -341,10 +357,10 @@ def build_message():
     L.append("🧠 *심리 지표*")
     L.append(f"공포탐욕지수: {get_fear_greed()}")
     v, c = get_price("^VIX")
-    if v:
+    if v is not None:
         zone = "안정" if v < 15 else "경계" if v < 20 else "위험" if v < 30 else "패닉"
         L.append(
-            f"VIX: {v:.2f} ({'+' if c>=0 else ''}{c:.2f}%) → {zone} 구간"
+            f"VIX: {v:.2f} ({'+' if c >= 0 else ''}{c:.2f}%) → {zone} 구간"
         )
 
     L.append("")
@@ -356,7 +372,7 @@ def build_message():
 # 8. Telegram 전송
 # ─────────────────────────────────────────
 
-def send_telegram(text):
+def send_telegram(text: str) -> None:
     token   = os.environ["TELEGRAM_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
     for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
