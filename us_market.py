@@ -1,4 +1,4 @@
-"""us_market.py v3 - 미국 시장 아침 브리핑 (매일 07:00 KST)"""
+"""us_market.py v4 - 미국 시장 아침 브리핑 (매일 07:00 KST)"""
 
 import os, re, json, datetime, requests
 import yfinance as yf
@@ -6,9 +6,9 @@ from google import genai
 from google.genai import types
 
 # ── 설정 ──────────────────────────────────
-INDICES  = [("S&P500","^GSPC"),("나스닥","^IXIC"),("다우","^DJI"),("러셀2000","^RUT"),("필라델피아반도체","^SOX")]
-SECTORS  = {"기술":"XLK","임의소비재":"XLY","에너지":"XLE","금융":"XLF","헬스케어":"XLV","산업재":"XLI","소재":"XLB","필수소비재":"XLP","부동산":"XLRE","유틸리티":"XLU","커뮤니케이션":"XLC"}
-BIGTECH  = [("엔비디아","NVDA"),("애플","AAPL"),("마이크로소프트","MSFT"),("메타","META"),("아마존","AMZN"),("테슬라","TSLA"),("알파벳","GOOGL"),("TSMC","TSM"),("브로드컴","AVGO"),("AMD","AMD")]
+INDICES = [("S&P500","^GSPC"),("나스닥","^IXIC"),("다우","^DJI"),("러셀2000","^RUT"),("필라델피아반도체","^SOX")]
+SECTORS = {"기술":"XLK","임의소비재":"XLY","에너지":"XLE","금융":"XLF","헬스케어":"XLV","산업재":"XLI","소재":"XLB","필수소비재":"XLP","부동산":"XLRE","유틸리티":"XLU","커뮤니케이션":"XLC"}
+BIGTECH = [("엔비디아","NVDA"),("애플","AAPL"),("마이크로소프트","MSFT"),("메타","META"),("아마존","AMZN"),("테슬라","TSLA"),("알파벳","GOOGL"),("TSMC","TSM"),("브로드컴","AVGO"),("AMD","AMD")]
 
 # ── 공통 ──────────────────────────────────
 def get_price(ticker):
@@ -24,20 +24,21 @@ def fmt(v, c):
 
 def call_gemini(prompt, max_tokens=1200, temperature=0.3):
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    return client.models.generate_content(
+    resp = client.models.generate_content(
         model="gemini-2.5-flash", contents=prompt,
         config=types.GenerateContentConfig(max_output_tokens=max_tokens, temperature=temperature)
-    ).text.strip()
+    )
+    return resp.text.strip()
 
 # ── 섹션별 데이터 ──────────────────────────
 def get_risk_signal():
     data = {k: get_price(t) for k, t in [("nasdaq","^IXIC"),("vix","^VIX"),("dollar","DX-Y.NYB"),("bond","^TNX"),("gold","GC=F")]}
     s = sum([
-        (data["nasdaq"][1] or 0)  >  0,
-        (data["vix"][1]    or 0)  <  0,
-        (data["dollar"][1] or 0)  <  0,
-        (data["gold"][1]   or 0)  <  0,
-        -((data["bond"][1] or 0)  >  0),
+        (data["nasdaq"][1] or 0) > 0,
+        (data["vix"][1]    or 0) < 0,
+        (data["dollar"][1] or 0) < 0,
+        (data["gold"][1]   or 0) < 0,
+        -((data["bond"][1] or 0) > 0),
     ])
     if   s >= 3: sig, desc = "🟢 리스크온",  "나스닥↑ VIX↓ 달러↓ - 위험자산 선호"
     elif s <= 1: sig, desc = "🔴 리스크오프", "안전자산 수요↑ 위험자산 회피"
@@ -53,28 +54,53 @@ def get_fear_greed():
         return f"{emoji} {v} ({d[0]['value_classification']}) ({'↑' if diff>0 else '↓'}{abs(diff)})"
     except: return "N/A"
 
+def get_sectors():
+    """get_price 중복 호출 방지 - 섹터당 1회만 조회"""
+    result = []
+    for name, ticker in SECTORS.items():
+        v, c = get_price(ticker)
+        if c is not None:
+            result.append((name, c))
+    return sorted(result, key=lambda x: x[1], reverse=True)
+
 def pick_stocks(kst_date):
-    prompt = f"""오늘은 {kst_date}입니다. 미국 증시 기준 최근 주목받은 종목을 아래 JSON으로만 응답하세요. 다른 텍스트 절대 금지.
-[{{"ticker":"NVDA","name":"엔비디아","desc":"AI GPU","reason":"블랙웰 수요 급증으로 가이던스 상향"}}]
-규칙: 7~10개, 상승/하락 혼합, reason은 구체적 수치/이벤트 포함 명사형, 확실한 종목만"""
+    prompt = (
+        f"오늘은 {kst_date}입니다. "
+        "미국 증시 기준 최근 며칠간 실적 발표, 급등락, 대형 뉴스로 주목받은 종목을 선정하세요.\n"
+        "JSON 배열만 출력하세요. 설명, 마크다운, 코드블록 절대 금지.\n"
+        '[{"ticker":"NVDA","name":"엔비디아","desc":"AI GPU 설계","reason":"블랙웰 수요 급증으로 가이던스 상향"}]\n'
+        "규칙: 7~10개, 상승/하락 혼합, reason은 구체적 수치/이벤트 포함 명사형, 확실한 종목만"
+    )
     try:
-        raw = call_gemini(prompt, max_tokens=800, temperature=0.1)
-        raw = re.sub(r'```(?:json)?|```', '', raw).strip()  # 코드블록 제거
+        raw = call_gemini(prompt, max_tokens=1200, temperature=0.1)
+        print(f"[DEBUG Gemini raw]:\n{raw[:800]}\n")
+        raw = re.sub(r'<thinking>.*?</thinking>', '', raw, flags=re.DOTALL)
+        raw = re.sub(r'```(?:json)?\s*|\s*```', '', raw).strip()
         m   = re.search(r'\[.*\]', raw, re.DOTALL)
-        if not m: return []
-        return [(d["ticker"], d.get("name",""), d.get("desc",""), d.get("reason","")) for d in json.loads(m.group())]
-    except: return []
+        if not m:
+            print(f"[DEBUG] JSON 배열 파싱 실패. 처리 후:\n{raw[:400]}")
+            return []
+        parsed = json.loads(m.group())
+        print(f"[DEBUG] 파싱 성공: {len(parsed)}개 종목")
+        return [(d["ticker"], d.get("name",""), d.get("desc",""), d.get("reason","")) for d in parsed]
+    except Exception as e:
+        print(f"[ERROR] pick_stocks 예외: {type(e).__name__}: {e}")
+        return []
 
 def verify_stocks(picks):
+    print(f"[DEBUG] verify 시작: {len(picks)}개")
     result = []
     for ticker, name, desc, reason in picks:
         v, c = get_price(ticker)
-        if v is None: continue
+        if v is None:
+            print(f"[DEBUG] {ticker} 가격조회 실패")
+            continue
         try:
             h = yf.Ticker(ticker).history(period="10d")
             vol_ratio = float(h["Volume"].iloc[-1]) / float(h["Volume"].iloc[-6:-1].mean())
         except: vol_ratio = 1.0
         result.append({"ticker":ticker,"name":name,"desc":desc,"reason":reason,"chg":c,"vol_ratio":vol_ratio})
+    print(f"[DEBUG] verify 완료: {len(result)}개")
     return result
 
 # ── 메시지 조립 ────────────────────────────
@@ -91,7 +117,7 @@ def build_message():
     L += ["", f"*시장 신호: {sig}*", f"└ {desc}"]
     if bond[0]: L.append(f"└ 미국10년채 {bond[0]:.2f}% ({'+' if bond[1]>=0 else ''}{bond[1]:.2f}%)")
 
-    sectors = sorted([(n, get_price(t)[1]) for n, t in SECTORS.items() if get_price(t)[1] is not None], key=lambda x: x[1], reverse=True)
+    sectors = get_sectors()
     L += ["", "📂 *섹터 등락*", "🏆 Top 5"]
     for n, c in sectors[:5]:  L.append(f"  {'+' if c>=0 else ''}{c:.2f}%  {n}")
     L.append("💀 Bottom 5")
@@ -107,10 +133,14 @@ def build_message():
     if row: L.append("  " + row[0])
 
     L += ["", "⭐ *특징주*"]
-    for s in verify_stocks(pick_stocks(kst.strftime("%Y년 %m월 %d일"))):
-        vol = f"  _(거래량 {s['vol_ratio']:.1f}배)_" if s["vol_ratio"] >= 2.0 else ""
-        L.append(f"{'🔺' if s['chg']>=0 else '🔻'} *{s['ticker']}* ({s['name']}) {'+' if s['chg']>=0 else ''}{s['chg']:.1f}%  _{s['desc']}_{vol}")
-        if s["reason"]: L.append(f"   └ {s['reason']}")
+    stocks = verify_stocks(pick_stocks(kst.strftime("%Y년 %m월 %d일")))
+    if stocks:
+        for s in stocks:
+            vol = f"  _(거래량 {s['vol_ratio']:.1f}배)_" if s["vol_ratio"] >= 2.0 else ""
+            L.append(f"{'🔺' if s['chg']>=0 else '🔻'} *{s['ticker']}* ({s['name']}) {'+' if s['chg']>=0 else ''}{s['chg']:.1f}%  _{s['desc']}_{vol}")
+            if s["reason"]: L.append(f"   └ {s['reason']}")
+    else:
+        L.append("  _(데이터 수집 실패)_")
 
     v, c = get_price("^VIX")
     zone = "안정" if v and v<15 else "경계" if v and v<20 else "위험" if v and v<30 else "패닉"
