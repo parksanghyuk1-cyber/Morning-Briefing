@@ -1,20 +1,14 @@
 """
-dashboard.py v6
-────────────────
+dashboard.py v7
+─────────────────
 글로벌 매크로 대시보드
-- yfinance: 시장 데이터 (무료)
-- Gemini 2.5 Flash: 시장 코멘트 (무료)
-- 특이사항 자동 감지 (급등락 알림 포함)
-- AI 코멘트 본문 통합 → 단일 메시지 전송
-매일 오전 7시 KST 텔레그램 전송
+- yfinance: 시장 데이터
+- Gemini 2.5 Flash: 시장 코멘트
+- 매일 오전 7시 KST 텔레그램 전송
 """
-import os
-import re
-import datetime
-import requests
+import os, re, datetime, requests
 import yfinance as yf
 
-# google-genai 선택적 임포트
 try:
     from google import genai
     from google.genai import types
@@ -22,53 +16,102 @@ try:
 except ImportError:
     GENAI_AVAILABLE = False
 
-# ─────────────────────────────────────────
-# 유틸
-# ─────────────────────────────────────────
-def get_price(ticker: str, period: str = "5d") -> tuple:
+
+# ── 설정 ──────────────────────────────────────────────────────────────────────
+
+TICKER_LABELS = {
+    "^IRX": "미국채 2년금리", "^TNX": "미국채 10년금리", "^TYX": "미국채 30년금리",
+    "DX-Y.NYB": "달러인덱스", "KRW=X": "원/달러",
+    "^VIX": "VIX", "BTC-USD": "비트코인", "ETH-USD": "이더리움",
+    "ES=F": "S&P500선물", "NQ=F": "나스닥선물", "YM=F": "다우선물", "RTY=F": "러셀2000선물",
+    "^KS11": "코스피", "^KQ11": "코스닥",
+    "CL=F": "WTI유가", "GC=F": "국제금", "HG=F": "구리",
+}
+
+# 급등락 임계값 (%)
+ALERT_THRESHOLDS = {
+    "^IRX": 5.0, "^TNX": 3.0, "^TYX": 3.0,
+    "DX-Y.NYB": 1.0, "KRW=X": 1.0,
+    "^VIX": 10.0,
+    "BTC-USD": 5.0, "ETH-USD": 5.0,
+    "ES=F": 1.5, "NQ=F": 2.0, "YM=F": 1.5, "RTY=F": 2.0,
+    "^KS11": 1.5, "^KQ11": 2.0,
+    "CL=F": 3.0, "GC=F": 2.0, "HG=F": 2.0,
+}
+DEFAULT_THRESHOLD = 2.0
+
+# 금리 지표 — bp(절대 변동) 표시
+RATE_TICKERS = {"^IRX", "^TNX", "^TYX"}
+
+
+# ── 데이터 수집 ───────────────────────────────────────────────────────────────
+
+def get_price(ticker: str) -> tuple:
+    """일반 지표: 직전 영업일 대비 변동률 반환"""
     try:
-        hist = yf.Ticker(ticker).history(period=period)
-        if hist.empty:
-            return None, None
+        hist = yf.Ticker(ticker).history(period="5d")
         close = hist["Close"].dropna()
         if len(close) < 2:
             return None, None
-        curr = float(close.iloc[-1])
-        prev = float(close.iloc[-2])
+        curr, prev = float(close.iloc[-1]), float(close.iloc[-2])
         if prev == 0:
             return None, None
         return curr, (curr - prev) / prev * 100
     except Exception as e:
-        print(f"[get_price] {ticker} 오류: {e}")
+        print(f"[get_price] {ticker}: {e}")
+        return None, None
+
+
+def get_rate(ticker: str) -> tuple:
+    """
+    금리 지표: 변동값을 bp(basis point)로 반환.
+    yfinance 금리 값은 % 단위(e.g. 4.25)이므로
+    절대 변동 = curr - prev (단위: %), bp = 절대변동 * 100
+    """
+    try:
+        hist = yf.Ticker(ticker).history(period="5d")
+        close = hist["Close"].dropna()
+        if len(close) < 2:
+            return None, None
+        curr, prev = float(close.iloc[-1]), float(close.iloc[-2])
+        bp_chg = (curr - prev) * 100  # bp
+        return curr, bp_chg
+    except Exception as e:
+        print(f"[get_rate] {ticker}: {e}")
         return None, None
 
 
 def get_kr_index(ticker: str) -> tuple:
-    """한국 지수 전용 — 여러 기간 시도"""
-    for p in ["2d", "5d", "10d", "1mo"]:
-        try:
-            hist = yf.Ticker(ticker).history(period=p)
-            if hist.empty:
-                continue
-            close = hist["Close"].dropna()
-            if len(close) < 2:
-                continue
-            curr = float(close.iloc[-1])
-            prev = float(close.iloc[-2])
-            if prev == 0:
-                continue
-            if ticker == "^KS11" and curr < 500:
-                continue
-            if ticker == "^KQ11" and curr < 200:
-                continue
-            return curr, (curr - prev) / prev * 100
-        except Exception as e:
-            print(f"[get_kr_index] {ticker}/{p} 오류: {e}")
-            continue
-    return None, None
+    """
+    코스피/코스닥 딜레이 방지:
+    - period 루프 대신 start/end 날짜 명시로 Yahoo 캐시 문제 우회
+    - 최근 5 영업일치 데이터를 명시적으로 요청
+    """
+    try:
+        end   = datetime.date.today() + datetime.timedelta(days=1)
+        start = end - datetime.timedelta(days=10)
+        hist  = yf.Ticker(ticker).history(start=str(start), end=str(end))
+        close = hist["Close"].dropna()
+
+        # 유효성 검사 (코스피 < 1500, 코스닥 < 400 이면 데이터 이상)
+        min_valid = {"^KS11": 1500, "^KQ11": 400}
+        threshold = min_valid.get(ticker, 0)
+        close = close[close > threshold]
+
+        if len(close) < 2:
+            return None, None
+        curr, prev = float(close.iloc[-1]), float(close.iloc[-2])
+        if prev == 0:
+            return None, None
+        return curr, (curr - prev) / prev * 100
+    except Exception as e:
+        print(f"[get_kr_index] {ticker}: {e}")
+        return None, None
 
 
-def fmt(value, chg, decimals: int = 2, comma: bool = True) -> str:
+# ── 포맷 ──────────────────────────────────────────────────────────────────────
+
+def fmt_pct(value, chg, decimals=2, comma=True) -> str:
     if value is None or chg is None:
         return "N/A"
     arrow = "🔺" if chg >= 0 else "▼"
@@ -77,90 +120,55 @@ def fmt(value, chg, decimals: int = 2, comma: bool = True) -> str:
     return f"{num} ({sign}{chg:.2f}% {arrow})"
 
 
+def fmt_bp(value, bp) -> str:
+    """금리 전용 포맷: 4.25% (+3bp 🔺)"""
+    if value is None or bp is None:
+        return "N/A"
+    arrow = "🔺" if bp >= 0 else "▼"
+    sign  = "+" if bp >= 0 else ""
+    return f"{value:.2f}% ({sign}{bp:.1f}bp {arrow})"
+
+
 def b(text: str) -> str:
     return f"<b>{text}</b>"
 
 
-# ─────────────────────────────────────────
-# 특이사항 감지
-# ─────────────────────────────────────────
-# 지표별 급등락 임계값 (절대값 %)
-ALERT_THRESHOLDS = {
-    "^IRX": 5.0, "^TNX": 3.0, "^TYX": 3.0,   # 금리: 5bp 이상 변동도 큼 → % 기준 완화
-    "DX-Y.NYB": 1.0,
-    "KRW=X": 1.0,
-    "^VIX": 10.0,
-    "BTC-USD": 5.0, "ETH-USD": 5.0,
-    "ES=F": 1.5, "NQ=F": 2.0, "YM=F": 1.5, "RTY=F": 2.0,
-    "^KS11": 1.5, "^KQ11": 2.0,
-    "CL=F": 3.0, "GC=F": 2.0, "HG=F": 2.0,
-}
-DEFAULT_THRESHOLD = 2.0  # 기타 지표
+# ── 특이사항 감지 ─────────────────────────────────────────────────────────────
 
-TICKER_LABELS = {
-    "^IRX": "미국채 2년금리", "^TNX": "미국채 10년금리", "^TYX": "미국채 30년금리",
-    "DX-Y.NYB": "달러인덱스", "KRW=X": "원/달러",
-    "^VIX": "VIX(공포지수)", "BTC-USD": "비트코인", "ETH-USD": "이더리움",
-    "ES=F": "S&P500선물", "NQ=F": "나스닥선물", "YM=F": "다우선물", "RTY=F": "러셀2000선물",
-    "^KS11": "코스피", "^KQ11": "코스닥",
-    "CL=F": "WTI유가", "GC=F": "국제금", "HG=F": "구리",
-}
-
-def detect_anomalies(data_records: list[dict]) -> list[str]:
-    """
-    data_records: [{"ticker": ..., "label": ..., "value": ..., "chg": ...}, ...]
-    급등락 항목을 문자열 리스트로 반환
-    """
+def detect_anomalies(records: list[dict]) -> list[str]:
     alerts = []
-    for rec in data_records:
-        if rec["chg"] is None:
+    for r in records:
+        if r["chg"] is None:
             continue
-        threshold = ALERT_THRESHOLDS.get(rec["ticker"], DEFAULT_THRESHOLD)
-        if abs(rec["chg"]) >= threshold:
-            direction = "급등" if rec["chg"] > 0 else "급락"
-            alerts.append(
-                f"{rec['label']} {direction} ({rec['chg']:+.2f}%)"
-            )
+        threshold = ALERT_THRESHOLDS.get(r["ticker"], DEFAULT_THRESHOLD)
+        # 금리는 bp 기준이므로 % 임계값과 단위 맞춤 (bp는 별도 판단)
+        chg_abs = abs(r["chg"])
+        if r["ticker"] in RATE_TICKERS:
+            # bp 기준: 10bp 이상이면 알림
+            if chg_abs >= 10:
+                direction = "급등" if r["chg"] > 0 else "급락"
+                alerts.append(f"{r['label']} {direction} ({r['chg']:+.1f}bp)")
+        else:
+            if chg_abs >= threshold:
+                direction = "급등" if r["chg"] > 0 else "급락"
+                alerts.append(f"{r['label']} {direction} ({r['chg']:+.2f}%)")
     return alerts
 
 
-# ─────────────────────────────────────────
-# Gemini 호출
-# ─────────────────────────────────────────
-def call_gemini(prompt: str, max_tokens: int = 600, temperature: float = 0.3) -> str:
-    if not GENAI_AVAILABLE:
-        raise RuntimeError("google-genai 패키지가 설치되지 않았습니다.")
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    resp = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            max_output_tokens=max_tokens,
-            temperature=temperature,
-        ),
-    )
-    return resp.text.strip()
-
-
-def normalize_newlines(text: str) -> str:
-    text = re.sub(r'([다요됩니다습니다니다판단전망우려확대주목\.]) ', r'\1\n', text)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    return text.strip()
-
+# ── Gemini ────────────────────────────────────────────────────────────────────
 
 def get_ai_commentary(market_data: str, anomalies: list[str]) -> str:
-    api_key = os.environ.get("GEMINI_API_KEY", "")
-    if not api_key:
+    if not os.environ.get("GEMINI_API_KEY"):
         return "⚠️ GEMINI_API_KEY 미설정"
     if not GENAI_AVAILABLE:
         return "⚠️ google-genai 패키지 미설치"
 
-    anomaly_section = ""
-    if anomalies:
-        anomaly_section = "\n[오늘의 특이 급등락 항목]\n" + "\n".join(f"- {a}" for a in anomalies)
+    anomaly_section = (
+        "\n[오늘의 특이 급등락 항목]\n" + "\n".join(f"- {a}" for a in anomalies)
+        if anomalies else ""
+    )
 
-    try:
-        prompt = f"""당신은 한국 기관투자자를 위한 시장 전략가입니다.
+    prompt = f"""당신은 한국 기관투자자를 위한 시장 전략가입니다.
 아래 지표와 특이사항을 바탕으로 오늘 시장 브리핑을 작성하세요.
 
 [지표 데이터]
@@ -168,203 +176,176 @@ def get_ai_commentary(market_data: str, anomalies: list[str]) -> str:
 {anomaly_section}
 
 아래 4개 섹션을 순서대로 작성하세요. 각 섹션 사이에 빈 줄 하나.
-각 섹션은 반드시 2문장 이내로 간결하게 작성 (토큰 절약).
+각 섹션은 반드시 2문장 이내로 간결하게 작성.
 
 [섹션 1 — 오늘의 특이사항]
-급등락 항목이 있으면 지표명·변동폭·가능한 원인(금리 결정·지정학·수급) 포함.
+급등락 항목이 있으면 지표명, 변동폭, 가능한 원인(금리 결정, 지정학, 수급) 포함.
 특이사항이 없으면 "특이 급등락 없음" 한 줄.
 
 [섹션 2 — 매크로 → 증시 파급 경로]
-금리·달러·원화·VIX가 코스피/코스닥에 미치는 구체적 인과 경로를 화살표(→) 형식으로.
-예: "10년물 금리 급등 → 성장주 밸류 압박 → 코스닥 낙폭 확대 우려"
+금리, 달러, 원화, VIX가 코스피/코스닥에 미치는 구체적 인과 경로를 화살표(→) 형식으로.
 
-[섹션 3 — 섹터·종목 시사점]
+[섹션 3 — 섹터 시사점]
 유리한 섹터 1개, 불리한 섹터 1개를 한국 상장 업종 기준으로 명시.
 
 [섹션 4 — 오늘 대응 전략]
-🟢/🔴/🟡 리스크 판단 명시 후, 비중 조절·헤지 방향을 2문장 이내로.
+🟢/🔴/🟡 리스크 판단 명시 후 비중 조절, 헤지 방향을 2문장 이내로.
 
 작성 규칙:
 - 섹션 제목([섹션 N — ...]) 반드시 포함
-- 수치 단순 나열 금지, 해석·시사점 포함
+- 수치 단순 나열 금지, 해석 포함
 - 모든 문장 명사형 마무리 (~우려, ~전망, ~주목, ~판단)
 - HTML 태그, 마크다운 기호 절대 금지
-- 전문적·간결한 한국어"""
+- 전문적 간결한 한국어"""
 
-        raw = call_gemini(prompt, max_tokens=900, temperature=0.5)
-        return normalize_newlines(raw)
+    try:
+        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(max_output_tokens=900, temperature=0.5),
+        )
+        text = resp.text.strip()
+        # 연속 3줄 이상 공백 정리
+        return re.sub(r'\n{3,}', '\n\n', text)
     except Exception as e:
         print(f"Gemini 오류: {e}")
         return f"⚠️ AI 코멘트 생성 실패: {str(e)[:150]}"
 
 
-# ─────────────────────────────────────────
-# 대시보드 조립
-# ─────────────────────────────────────────
+# ── 대시보드 조립 ─────────────────────────────────────────────────────────────
+
 def build_dashboard() -> tuple[str, str]:
-    """(지표 메시지, AI 코멘트 메시지) 튜플 반환 — 각각 독립 전송"""
     kst_now  = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
     time_str = kst_now.strftime("%Y-%m-%d %H:%M:%S")
 
-    L            = []   # 텔레그램 메시지 라인 (HTML)
-    SL           = []   # Gemini 요약용 plain text
-    data_records = []   # 특이사항 감지용
+    L       = []  # 텔레그램 HTML 라인
+    SL      = []  # Gemini 요약용 plain text
+    records = []  # 특이사항 감지용
 
-    def add(ticker: str, label: str, v, c, decimals=2):
+    def add(ticker: str, label: str, v, c, decimals=2, is_rate=False):
         if v is None or c is None:
             return
-        L.append(f"{label}: {fmt(v, c, decimals)}")
-        key = label.split()[-1]
-        SL.append(f"{key}: {v:.4f} ({c:+.2f}%)")
-        data_records.append({
-            "ticker": ticker,
-            "label": TICKER_LABELS.get(ticker, key),
-            "value": v,
-            "chg": c,
-        })
+        line = f"{label}: " + (fmt_bp(v, c) if is_rate else fmt_pct(v, c, decimals))
+        L.append(line)
+        SL.append(f"{TICKER_LABELS.get(ticker, label)}: {v:.4f} ({c:+.2f})")
+        records.append({"ticker": ticker, "label": TICKER_LABELS.get(ticker, label), "value": v, "chg": c})
 
     L.append(b("🌍 글로벌 매크로 대시보드"))
     L.append(f"🕒 기준 시각: {time_str} (KST)")
 
-    # ── 핵심 지표 ──
+    # 핵심 지표
     L.append(""); L.append(b("🔑 핵심 지표 (금리/달러)"))
-    v, c = get_price("^IRX");     add("^IRX",     "🇺🇸 미국채 2년",   v, c)
-    v, c = get_price("^TNX");     add("^TNX",     "🇺🇸 미국채 10년",  v, c)
-    v, c = get_price("^TYX");     add("^TYX",     "🇺🇸 미국채 30년",  v, c)
-    v, c = get_price("DX-Y.NYB"); add("DX-Y.NYB", "💵 달러 인덱스",   v, c)
+    for ticker, label in [("^IRX", "🇺🇸 미국채 2년"), ("^TNX", "🇺🇸 미국채 10년"), ("^TYX", "🇺🇸 미국채 30년")]:
+        add(ticker, label, *get_rate(ticker), is_rate=True)
+    add("DX-Y.NYB", "💵 달러 인덱스", *get_price("DX-Y.NYB"))
 
-    # ── 주요 환율 ──
+    # 환율
     L.append(""); L.append(b("💱 주요 환율 (FX)"))
     krw_v, krw_c = get_price("KRW=X")
     add("KRW=X", "🇰🇷 원/달러", krw_v, krw_c)
 
+    # 엔/원 계산 (오류 시 None 반환, 0으로 하드코딩하지 않음)
     jpy_v, _ = get_price("JPY=X")
     if krw_v and jpy_v:
         jpy_krw = krw_v / jpy_v
+        jpy_chg = None
         try:
-            h_k  = yf.Ticker("KRW=X").history(period="5d")
-            h_j  = yf.Ticker("JPY=X").history(period="5d")
-            prev = (float(h_k["Close"].dropna().iloc[-2])
-                    / float(h_j["Close"].dropna().iloc[-2]))
-            jc   = (jpy_krw - prev) / prev * 100
+            h_k = yf.Ticker("KRW=X").history(period="5d")["Close"].dropna()
+            h_j = yf.Ticker("JPY=X").history(period="5d")["Close"].dropna()
+            prev = float(h_k.iloc[-2]) / float(h_j.iloc[-2])
+            jpy_chg = (jpy_krw - prev) / prev * 100
         except Exception:
-            jc = 0.0
-        L.append(f"🇯🇵 엔/원 (1엔): {fmt(jpy_krw, jc, 2)}")
-        SL.append(f"엔원: {jpy_krw:.2f} ({jc:+.2f}%)")
+            pass
+        if jpy_chg is not None:
+            L.append(f"🇯🇵 엔/원 (1엔): {fmt_pct(jpy_krw, jpy_chg, 2)}")
+            SL.append(f"엔원: {jpy_krw:.2f} ({jpy_chg:+.2f}%)")
 
-    v, c = get_price("EURUSD=X"); add("EURUSD=X", "🇪🇺 유로/달러",  v, c, 4)
-    v, c = get_price("CNY=X");    add("CNY=X",    "🇨🇳 달러/위안",  v, c, 4)
+    add("EURUSD=X", "🇪🇺 유로/달러", *get_price("EURUSD=X"), decimals=4)
+    add("CNY=X",    "🇨🇳 달러/위안", *get_price("CNY=X"),    decimals=4)
 
-    # ── 시장 심리 & 코인 ──
+    # 심리/코인
     L.append(""); L.append(b("📉 시장 심리 & 코인"))
-    v, c = get_price("^VIX");    add("^VIX",    "😨 VIX",    v, c)
-    v, c = get_price("BTC-USD"); add("BTC-USD", "🪙 비트코인", v, c, 0)
-    v, c = get_price("ETH-USD"); add("ETH-USD", "💎 이더리움", v, c, 0)
+    add("^VIX",    "😨 VIX",    *get_price("^VIX"))
+    add("BTC-USD", "🪙 비트코인", *get_price("BTC-USD"), decimals=0)
+    add("ETH-USD", "💎 이더리움", *get_price("ETH-USD"), decimals=0)
 
-    # ── 미국 지수 선물 ──
-    L.append(""); L.append(b("🇺🇸 미국 지수 선물 (Futures)"))
-    v, c = get_price("ES=F");  add("ES=F",  "🇺🇸 S&P 500 선물",    v, c, 0)
-    v, c = get_price("YM=F");  add("YM=F",  "🇺🇸 다우 존스 선물",  v, c, 0)
-    v, c = get_price("NQ=F");  add("NQ=F",  "🇺🇸 나스닥 100 선물", v, c, 0)
-    v, c = get_price("RTY=F"); add("RTY=F", "🇺🇸 러셀 2000 선물",  v, c, 0)
+    # 미국 선물
+    L.append(""); L.append(b("🇺🇸 미국 지수 선물"))
+    add("ES=F",  "S&P 500 선물",    *get_price("ES=F"),  decimals=0)
+    add("YM=F",  "다우 존스 선물",  *get_price("YM=F"),  decimals=0)
+    add("NQ=F",  "나스닥 100 선물", *get_price("NQ=F"),  decimals=0)
+    add("RTY=F", "러셀 2000 선물",  *get_price("RTY=F"), decimals=0)
 
-    # ── 한국 & 아시아 ──
+    # 한국/아시아
     L.append(""); L.append(b("🌏 한국 & 아시아"))
     v, c = get_kr_index("^KS11")
-    if v: add("^KS11", "🇰🇷 코스피", v, c, 0)
-    else: L.append("🇰🇷 코스피: 데이터 없음")
+    add("^KS11", "🇰🇷 코스피", v, c, decimals=0) if v else L.append("🇰🇷 코스피: 데이터 없음")
     v, c = get_kr_index("^KQ11")
-    if v: add("^KQ11", "🇰🇷 코스닥", v, c, 2)
-    else: L.append("🇰🇷 코스닥: 데이터 없음")
-    v, c = get_price("^TWII");     add("^TWII",     "🇹🇼 대만 가권",       v, c, 0)
-    v, c = get_price("^SOX");      add("^SOX",      "💾 필라델피아 반도체", v, c, 0)
-    v, c = get_price("^N225");     add("^N225",     "🇯🇵 니케이 225",      v, c, 0)
-    v, c = get_price("000001.SS"); add("000001.SS", "🇨🇳 상해 종합",       v, c, 0)
-    v, c = get_price("^HSI");      add("^HSI",      "🇭🇰 홍콩 항셍",       v, c, 0)
+    add("^KQ11", "🇰🇷 코스닥", v, c, decimals=2) if v else L.append("🇰🇷 코스닥: 데이터 없음")
+    add("^TWII",     "🇹🇼 대만 가권",       *get_price("^TWII"),     decimals=0)
+    add("^SOX",      "💾 필라델피아 반도체", *get_price("^SOX"),      decimals=0)
+    add("^N225",     "🇯🇵 니케이 225",      *get_price("^N225"),     decimals=0)
+    add("000001.SS", "🇨🇳 상해 종합",       *get_price("000001.SS"), decimals=0)
+    add("^HSI",      "🇭🇰 홍콩 항셍",       *get_price("^HSI"),      decimals=0)
 
-    # ── 원자재 & 귀금속 ──
+    # 원자재
     L.append(""); L.append(b("💢 원자재 & 귀금속"))
-    v, c = get_price("CL=F"); add("CL=F", "🛢️ WTI 유가", v, c)
-    v, c = get_price("HG=F"); add("HG=F", "🏗️ 구리",     v, c)
-    v, c = get_price("GC=F"); add("GC=F", "🥇 국제 금",  v, c, 0)
-    v, c = get_price("SI=F"); add("SI=F", "🥈 국제 은",  v, c)
-    v, c = get_price("ZC=F"); add("ZC=F", "🌽 옥수수",   v, c)
+    add("CL=F", "🛢️ WTI 유가", *get_price("CL=F"))
+    add("HG=F", "🏗️ 구리",     *get_price("HG=F"))
+    add("GC=F", "🥇 국제 금",  *get_price("GC=F"), decimals=0)
+    add("SI=F", "🥈 국제 은",  *get_price("SI=F"))
+    add("ZC=F", "🌽 옥수수",   *get_price("ZC=F"))
 
-    # ── 특이사항 감지 ──
-    anomalies = detect_anomalies(data_records)
-
+    # 급등락 알림
+    anomalies = detect_anomalies(records)
     if anomalies:
-        L.append("")
-        L.append(b("⚡ 오늘의 급등락 알림"))
-        for a in anomalies:
-            L.append(f"• {a}")
+        L.append(""); L.append(b("⚡ 오늘의 급등락 알림"))
+        L.extend(f"• {a}" for a in anomalies)
 
-    # ── AI 코멘트 생성 (별도 메시지) ──
+    # AI 코멘트
     print("  → Gemini 코멘트 생성 중...")
     commentary = get_ai_commentary("\n".join(SL), anomalies)
 
-    ai_lines = []
-    if commentary:
-        ai_lines.append(b("🤖 AI 시장 브리핑"))
-        ai_lines.append("")
-        for line in commentary.split("\n"):
-            stripped = line.strip()
-            if not stripped:
-                ai_lines.append("")
-                continue
-            # 섹션 헤더는 볼드 처리
-            if stripped.startswith("[섹션"):
-                ai_lines.append(b(stripped))
-            else:
-                ai_lines.append(stripped)
+    ai_lines = [b("🤖 AI 시장 브리핑"), ""]
+    for line in commentary.split("\n"):
+        stripped = line.strip()
+        ai_lines.append(b(stripped) if stripped.startswith("[섹션") else stripped)
 
-    indicators_msg = "\n".join(L)
-    ai_msg         = "\n".join(ai_lines) if ai_lines else ""
-    return indicators_msg, ai_msg
+    return "\n".join(L), "\n".join(ai_lines)
 
 
-# ─────────────────────────────────────────
-# Telegram 전송 (HTML 모드)
-# ─────────────────────────────────────────
-def split_into_chunks(text: str, limit: int = 3800) -> list[str]:
-    chunks  = []
-    current = ""
+# ── Telegram 전송 ─────────────────────────────────────────────────────────────
+
+def split_chunks(text: str, limit: int = 3800) -> list[str]:
+    chunks, current = [], ""
     for line in text.split("\n"):
-        if len(line) > limit:
-            sentences = line.replace(". ", ".\n").split("\n")
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit and current:
+            chunks.append(current)
+            current = line
         else:
-            sentences = [line]
-        for sentence in sentences:
-            candidate = current + "\n" + sentence if current else sentence
-            if len(candidate) > limit and current:
-                chunks.append(current)
-                current = sentence
-            else:
-                current = candidate
+            current = candidate
     if current:
         chunks.append(current)
     return chunks
 
 
-def send_telegram(text: str, parse_mode: str = "HTML"):
-    token   = os.environ["TELEGRAM_TOKEN"]
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]
-    url     = f"https://api.telegram.org/bot{token}/sendMessage"
+def send_telegram(text: str):
+    token   = os.environ.get("TELEGRAM_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        print("[Telegram] 환경변수 TELEGRAM_TOKEN 또는 TELEGRAM_CHAT_ID 미설정")
+        return
 
-    for chunk in split_into_chunks(text):
-        payload = {"chat_id": chat_id, "text": chunk}
-        if parse_mode:
-            payload["parse_mode"] = parse_mode
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    for chunk in split_chunks(text):
+        payload = {"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"}
         try:
             resp = requests.post(url, json=payload, timeout=15)
             if not resp.ok:
-                print(f"[Telegram] 전송 실패 ({parse_mode}): {resp.text[:200]}")
-                # HTML 파싱 오류 시 plain text 재시도
-                resp2 = requests.post(
-                    url,
-                    json={"chat_id": chat_id, "text": chunk},
-                    timeout=15,
-                )
+                print(f"[Telegram] HTML 전송 실패: {resp.text[:200]}")
+                resp2 = requests.post(url, json={"chat_id": chat_id, "text": chunk}, timeout=15)
                 if not resp2.ok:
                     print(f"[Telegram] plain text 재시도 실패: {resp2.text[:200]}")
         except requests.RequestException as e:
@@ -377,13 +358,10 @@ def main():
     print(indicators_msg)
     print("\n--- AI 코멘트 ---")
     print(ai_msg)
-
     print("\n텔레그램 전송 중...")
-    # 메시지 1: 지표 + 급등락 알림 (HTML)
-    send_telegram(indicators_msg, parse_mode="HTML")
-    # 메시지 2: AI 브리핑 (항상 새 메시지, HTML)
+    send_telegram(indicators_msg)
     if ai_msg:
-        send_telegram(ai_msg, parse_mode="HTML")
+        send_telegram(ai_msg)
     print("✅ 완료")
 
 
