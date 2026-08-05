@@ -3,7 +3,7 @@ name: 글로벌 매크로 대시보드
 on:
   # 매일 KST 07:00 (UTC 22:00 전날) 자동 실행
   schedule:
-    - cron: '0 22 * * 1-5'
+    - cron: '0 22 * * 0-4'
   # 수동 트리거 (테스트용)
   workflow_dispatch:
 
