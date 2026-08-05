@@ -40,15 +40,92 @@ ALERT_THRESHOLDS = {
 DEFAULT_THRESHOLD = 2.0
 RATE_TICKERS = {"^IRX", "^TNX", "^TYX"}
 
+# 야후 대신 네이버 실시간 지수 API를 우선 사용할 티커 (야후 대비 지연이 짧음)
+NAVER_DOMESTIC_INDEX_CODE = {
+    "^KS11": "KOSPI",
+    "^KQ11": "KOSDAQ",
+}
+NAVER_WORLD_INDEX_CODE = {
+    "^N225": ".N225",       # 니케이 225
+    "^HSI": ".HSI",         # 항셍
+    "000001.SS": ".SSEC",   # 상해 종합
+    "^TWII": ".TWII",       # 대만 가권
+}
+
+
+# ── 요일 판단 (KST 기준) ────────────────────────────────────────────────────
+# ⚠️ GitHub Actions 러너는 UTC로 동작함
+# 스케줄 cron이 "0 22 * * 1-5" (월~금 22시 UTC) 로 되어있으면
+# 실제로는 화 수 목 금 토 07시 KST에 실행됨 (하루씩 밀림)
+# 워크플로 yml에서 cron을 "0 22 * * 0-4" (일~목 22시 UTC) 로 수정해야
+# 월~금 07시 KST에 정확히 발송됨
+# 아래 is_kr_business_day()는 스케줄이 잘못돼도 주말 오발송만은 막아주는 안전장치임
+
+def is_kr_business_day() -> bool:
+    kst_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
+    return kst_now.weekday() < 5  # 월=0 ... 금=4, 토=5, 일=6
+
+
+# ── 데이터 신선도 체크 ────────────────────────────────────────────────────────
+
+def _expected_last_trading_date_kst() -> datetime.date:
+    """KST 기준 가장 최근에 마감됐어야 할 영업일 반환"""
+    d = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)).date()
+    d -= datetime.timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= datetime.timedelta(days=1)
+    return d
+
+
+def _warn_if_stale(ticker: str, last_ts, max_lag_days: int = 1):
+    try:
+        last_date = last_ts.date() if hasattr(last_ts, "date") else last_ts
+        expected = _expected_last_trading_date_kst()
+        gap = (expected - last_date).days
+        if gap > max_lag_days:
+            print(f"[stale] {ticker}: 최신 데이터 {last_date}, 기대 {expected} ({gap}일 지연)")
+    except Exception:
+        pass
+
+
+def _fetch_naver_index(url: str) -> tuple:
+    try:
+        resp = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        data = resp.json()["result"]["areas"][0]["datas"][0]
+        curr = float(str(data["nv"]).replace(",", ""))
+        prev = float(str(data["pcv"]).replace(",", ""))
+        if prev == 0:
+            return None, None
+        return curr, (curr - prev) / prev * 100
+    except Exception as e:
+        print(f"[naver] {url}: {e}")
+        return None, None
+
+
+def get_naver_domestic_index(code: str) -> tuple:
+    return _fetch_naver_index(f"https://polling.finance.naver.com/api/realtime/domestic/index/{code}")
+
+
+def get_naver_world_index(code: str) -> tuple:
+    return _fetch_naver_index(f"https://polling.finance.naver.com/api/realtime/worldstock/index/{code}")
+
 
 # ── 데이터 수집 ───────────────────────────────────────────────────────────────
 
 def get_price(ticker: str) -> tuple:
+    naver_code = NAVER_WORLD_INDEX_CODE.get(ticker)
+    if naver_code:
+        v, c = get_naver_world_index(naver_code)
+        if v is not None:
+            return v, c
+        print(f"[get_price] {ticker}: 네이버 조회 실패, yfinance로 대체")
+
     try:
         hist = yf.Ticker(ticker).history(period="5d")
         close = hist["Close"].dropna()
         if len(close) < 2:
             return None, None
+        _warn_if_stale(ticker, close.index[-1])
         curr, prev = float(close.iloc[-1]), float(close.iloc[-2])
         if prev == 0:
             return None, None
@@ -64,6 +141,7 @@ def get_rate(ticker: str) -> tuple:
         close = hist["Close"].dropna()
         if len(close) < 2:
             return None, None
+        _warn_if_stale(ticker, close.index[-1])
         curr, prev = float(close.iloc[-1]), float(close.iloc[-2])
         return curr, (curr - prev) * 100  # bp
     except Exception as e:
@@ -72,15 +150,24 @@ def get_rate(ticker: str) -> tuple:
 
 
 def get_kr_index(ticker: str) -> tuple:
+    naver_code = NAVER_DOMESTIC_INDEX_CODE.get(ticker)
+    if naver_code:
+        v, c = get_naver_domestic_index(naver_code)
+        if v is not None:
+            return v, c
+        print(f"[get_kr_index] {ticker}: 네이버 조회 실패, yfinance로 대체")
+
     try:
-        end   = datetime.date.today() + datetime.timedelta(days=1)
-        start = end - datetime.timedelta(days=10)
-        hist  = yf.Ticker(ticker).history(start=str(start), end=str(end))
+        # KST와 UTC 러너 시간대 차이를 감안해 넉넉히 10일치를 가져온 뒤
+        # 최신 2개 값만 사용 (기존 date.today() 기반 윈도우는 UTC 기준이라
+        # 실행 시점에 따라 최신일이 빠지는 경우가 있었음)
+        hist  = yf.Ticker(ticker).history(period="10d")
         close = hist["Close"].dropna()
         min_valid = {"^KS11": 1500, "^KQ11": 400}
         close = close[close > min_valid.get(ticker, 0)]
         if len(close) < 2:
             return None, None
+        _warn_if_stale(ticker, close.index[-1])
         curr, prev = float(close.iloc[-1]), float(close.iloc[-2])
         if prev == 0:
             return None, None
@@ -319,6 +406,11 @@ def send_telegram(text: str):
 
 
 def main():
+    if not is_kr_business_day():
+        kst_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
+        print(f"주말({kst_now.strftime('%Y-%m-%d %A')})이라 전송 생략")
+        return
+
     print("대시보드 생성 중...")
     msg = build_dashboard()
     print(msg)
