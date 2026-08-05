@@ -6,7 +6,7 @@ dashboard.py v7
 - Gemini 2.5 Flash: 시장 코멘트
 - 매일 오전 7시 KST 텔레그램 전송 (평일만)
 """
-import os, re, datetime, requests
+import os, re, json, datetime, requests
 import yfinance as yf
 
 try:
@@ -40,16 +40,15 @@ ALERT_THRESHOLDS = {
 DEFAULT_THRESHOLD = 2.0
 RATE_TICKERS = {"^IRX", "^TNX", "^TYX"}
 
-# 야후 대신 네이버 실시간 지수 API를 우선 사용할 티커 (야후 대비 지연이 짧음)
-NAVER_DOMESTIC_INDEX_CODE = {
+# 야후 대신 네이버 일별 시세(종가 기준) API를 우선 사용할 티커
+# 실시간 nv 필드는 종가와 어긋나는 경우가 있어 반드시 siseJson의 종가 컬럼만 사용
+NAVER_CLOSE_SYMBOL = {
     "^KS11": "KOSPI",
     "^KQ11": "KOSDAQ",
-}
-NAVER_WORLD_INDEX_CODE = {
-    "^N225": ".N225",       # 니케이 225
-    "^HSI": ".HSI",         # 항셍
-    "000001.SS": ".SSEC",   # 상해 종합
-    "^TWII": ".TWII",       # 대만 가권
+    "^N225": "NII@NI225",     # 니케이 225
+    "^HSI": "NII@HSI",        # 항셍
+    "000001.SS": "NII@SSEC",  # 상해 종합
+    "^TWII": "NII@TWII",      # 대만 가권
 }
 
 
@@ -88,34 +87,39 @@ def _warn_if_stale(ticker: str, last_ts, max_lag_days: int = 1):
         pass
 
 
-def _fetch_naver_index(url: str) -> tuple:
+def get_naver_close(symbol: str, days: int = 12) -> tuple:
+    """네이버 일별 시세 API에서 종가만 가져와서 전일 대비 등락 계산
+    실시간 API의 nv(현재가)는 장중 호가나 지연 스냅샷이 섞여 실제 종가와
+    어긋나는 경우가 있어서 반드시 이 종가 컬럼 기준으로만 계산함"""
     try:
+        end   = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
+        start = end - datetime.timedelta(days=days)
+        url = (
+            "https://api.finance.naver.com/siseJson.naver"
+            f"?symbol={symbol}&requestType=1"
+            f"&startTime={start.strftime('%Y%m%d')}&endTime={end.strftime('%Y%m%d')}&timeframe=day"
+        )
         resp = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
-        data = resp.json()["result"]["areas"][0]["datas"][0]
-        curr = float(str(data["nv"]).replace(",", ""))
-        prev = float(str(data["pcv"]).replace(",", ""))
+        rows = json.loads(resp.text.replace("'", '"'))
+        # rows[0]은 헤더 ["날짜","시가","고가","저가","종가","거래량"], rows[1:]가 날짜 오름차순 데이터
+        data_rows = [r for r in rows[1:] if len(r) >= 5 and str(r[4]).strip() not in ("", "0")]
+        if len(data_rows) < 2:
+            return None, None
+        curr, prev = float(data_rows[-1][4]), float(data_rows[-2][4])
         if prev == 0:
             return None, None
         return curr, (curr - prev) / prev * 100
     except Exception as e:
-        print(f"[naver] {url}: {e}")
+        print(f"[naver_close] {symbol}: {e}")
         return None, None
-
-
-def get_naver_domestic_index(code: str) -> tuple:
-    return _fetch_naver_index(f"https://polling.finance.naver.com/api/realtime/domestic/index/{code}")
-
-
-def get_naver_world_index(code: str) -> tuple:
-    return _fetch_naver_index(f"https://polling.finance.naver.com/api/realtime/worldstock/index/{code}")
 
 
 # ── 데이터 수집 ───────────────────────────────────────────────────────────────
 
 def get_price(ticker: str) -> tuple:
-    naver_code = NAVER_WORLD_INDEX_CODE.get(ticker)
-    if naver_code:
-        v, c = get_naver_world_index(naver_code)
+    naver_symbol = NAVER_CLOSE_SYMBOL.get(ticker)
+    if naver_symbol:
+        v, c = get_naver_close(naver_symbol)
         if v is not None:
             return v, c
         print(f"[get_price] {ticker}: 네이버 조회 실패, yfinance로 대체")
@@ -150,9 +154,9 @@ def get_rate(ticker: str) -> tuple:
 
 
 def get_kr_index(ticker: str) -> tuple:
-    naver_code = NAVER_DOMESTIC_INDEX_CODE.get(ticker)
-    if naver_code:
-        v, c = get_naver_domestic_index(naver_code)
+    naver_symbol = NAVER_CLOSE_SYMBOL.get(ticker)
+    if naver_symbol:
+        v, c = get_naver_close(naver_symbol)
         if v is not None:
             return v, c
         print(f"[get_kr_index] {ticker}: 네이버 조회 실패, yfinance로 대체")
