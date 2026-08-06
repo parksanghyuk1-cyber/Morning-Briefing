@@ -1,16 +1,37 @@
 """
-credit_balance.py v1
+credit_balance.py v2
 ──────────────────────
-신용공여 잔고 추이 차트 캡처 후 텔레그램 전송
-- FreeSIS(금융투자협회)는 Angular 기반이라 데이터가 JS로 렌더링됨
-- 숫자 API 대신 실제 화면 차트를 스크린샷으로 캡처해서 그대로 전송
+신용공여 잔고 추이(KOFIA FreeSIS) 엑셀 다운로드 후 차트 생성, 텔레그램 전송
+- 페이지가 Angular 기반이라 숫자는 화면의 엑셀 다운로드 버튼을 직접 클릭해서 받음
+- 받은 엑셀의 신용거래융자 유가증권/코스닥 컬럼으로 matplotlib 차트 생성
 - 매일 오전 8시 13분 KST 텔레그램 전송 (평일만)
 """
-import os, datetime
+import os, re, datetime
 import requests
+import openpyxl
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import matplotlib.font_manager as fm
 from playwright.sync_api import sync_playwright
 
 URL = "https://freesis.kofia.or.kr/stat/FreeSIS.do?parentDivId=MSIS10000000000000&serviceId=STATSCU0100000070"
+XLSX_PATH = "/tmp/credit_balance.xlsx"
+DEBUG_SHOT = "/tmp/debug_page.png"
+
+# 엑셀 다운로드 버튼 후보 셀렉터, 위에서부터 순서대로 시도
+EXCEL_BUTTON_SELECTORS = [
+    "[title*='엑셀']",
+    "[aria-label*='엑셀']",
+    "[alt*='엑셀']",
+    "img[src*='excel']",
+    "img[src*='xls']",
+    "[class*='excel']",
+    "[class*='Excel']",
+    "button:has-text('엑셀')",
+    "a:has-text('엑셀')",
+]
 
 
 # ── 요일 판단 (KST 기준) ────────────────────────────────────────────────────
@@ -20,34 +41,85 @@ def is_kr_business_day() -> bool:
     return kst_now.weekday() < 5  # 월=0 ... 금=4, 토=5, 일=6
 
 
-# ── 차트 캡처 ────────────────────────────────────────────────────────────
+# ── 엑셀 다운로드 ────────────────────────────────────────────────────────
 
-def capture() -> list:
-    """차트 영역을 스크린샷으로 저장하고 파일 경로 리스트 반환"""
-    paths = []
+def download_excel() -> None:
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 1400, "height": 1200})
         page.goto(URL, wait_until="networkidle", timeout=30000)
-        page.wait_for_timeout(4000)  # 차트 렌더링 대기
+        page.wait_for_selector("text=신용거래융자", timeout=15000)
+        page.wait_for_timeout(2000)
 
-        # 국내 금융 통계 사이트 대부분 Highcharts 사용, 우선 이 셀렉터로 시도
-        charts = page.locator(".highcharts-container")
-        count = charts.count()
+        button = None
+        for sel in EXCEL_BUTTON_SELECTORS:
+            loc = page.locator(sel)
+            if loc.count() > 0:
+                button = loc.first
+                break
 
-        if count > 0:
-            for i in range(count):
-                path = f"/tmp/credit_chart_{i}.png"
-                charts.nth(i).screenshot(path=path)
-                paths.append(path)
-        else:
-            # 셀렉터가 안 맞아도 전체 화면으로 대체, 최소한 실패는 안 하게
-            path = "/tmp/credit_chart_full.png"
-            page.screenshot(path=path, full_page=True)
-            paths.append(path)
+        if button is None:
+            page.screenshot(path=DEBUG_SHOT, full_page=True)
+            browser.close()
+            raise RuntimeError("엑셀 다운로드 버튼을 찾지 못함")
 
+        with page.expect_download(timeout=20000) as download_info:
+            button.click()
+        download_info.value.save_as(XLSX_PATH)
         browser.close()
-    return paths
+
+
+# ── 엑셀 파싱 ────────────────────────────────────────────────────────────
+
+def parse_xlsx() -> tuple:
+    wb = openpyxl.load_workbook(XLSX_PATH, data_only=True)
+    ws = wb.active
+
+    rows = []
+    date_pattern = re.compile(r"\d{4}/\d{2}/\d{2}")
+    for row in ws.iter_rows(values_only=True):
+        if not row or not row[0] or not date_pattern.match(str(row[0])):
+            continue
+        d = datetime.datetime.strptime(str(row[0]), "%Y/%m/%d").date()
+        yga = int(str(row[2]).replace(",", ""))      # 신용거래융자 유가증권
+        kosdaq = int(str(row[3]).replace(",", ""))   # 신용거래융자 코스닥
+        rows.append((d, yga, kosdaq))
+
+    rows.sort(key=lambda x: x[0])
+    dates = [r[0] for r in rows]
+    yga_vals = [r[1] for r in rows]
+    kosdaq_vals = [r[2] for r in rows]
+    return dates, yga_vals, kosdaq_vals
+
+
+# ── 차트 생성 ────────────────────────────────────────────────────────────
+
+def setup_korean_font():
+    font_path = "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"
+    if os.path.exists(font_path):
+        fm.fontManager.addfont(font_path)
+        plt.rcParams["font.family"] = fm.FontProperties(fname=font_path).get_name()
+    plt.rcParams["axes.unicode_minus"] = False
+
+
+def plot_chart(dates: list, values: list, label: str, path: str):
+    fig, ax = plt.subplots(figsize=(9, 5.2))
+    ax.plot(dates, values, color="#8B2FC9", linewidth=1.8)
+    ax.set_ylim(min(values) * 0.9, max(values) * 1.05)
+    ax.grid(axis="y", color="#e5e5e5", linewidth=0.8)
+    ax.spines[["top", "right", "left"]].set_visible(False)
+    ax.spines["bottom"].set_color("#dddddd")
+    ax.yaxis.set_major_formatter(lambda x, _: f"{int(x):,}")
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y%m%d"))
+    plt.xticks(rotation=90, fontsize=8)
+    plt.yticks(fontsize=8)
+    ax.tick_params(length=0)
+    ax.plot([], [], "o", color="#8B2FC9", label=label)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), frameon=False, fontsize=9)
+    plt.tight_layout()
+    plt.savefig(path, dpi=150, facecolor="white")
+    plt.close()
 
 
 # ── 텔레그램 전송 ────────────────────────────────────────────────────────
@@ -58,7 +130,6 @@ def send_photo(path: str, caption: str = ""):
     if not token or not chat_id:
         print("[Telegram] 환경변수 TELEGRAM_TOKEN 또는 TELEGRAM_CHAT_ID 미설정")
         return
-
     url = f"https://api.telegram.org/bot{token}/sendPhoto"
     with open(path, "rb") as f:
         resp = requests.post(
@@ -83,16 +154,25 @@ def main():
         print(f"주말({kst_now.strftime('%Y-%m-%d %A')})이라 전송 생략")
         return
 
-    print("차트 캡처 중...")
+    print("엑셀 다운로드 중...")
     try:
-        paths = capture()
+        download_excel()
+        dates, yga_vals, kosdaq_vals = parse_xlsx()
     except Exception as e:
-        send_text(f"신용잔고 차트 캡처 실패: {e}")
+        if os.path.exists(DEBUG_SHOT):
+            send_photo(DEBUG_SHOT, caption=f"신용잔고 캡처 실패: {e}")
+        else:
+            send_text(f"신용잔고 캡처 실패: {e}")
         raise
 
-    print(f"캡처 완료, {len(paths)}개 이미지 전송 중...")
-    for path in paths:
-        send_photo(path, caption="신용공여 잔고 추이 (KOFIA FreeSIS)")
+    print(f"데이터 {len(dates)}건 확보, 차트 생성 중...")
+    setup_korean_font()
+    plot_chart(dates, yga_vals, "신용거래융자-유가증권", "/tmp/chart_yga.png")
+    plot_chart(dates, kosdaq_vals, "신용거래융자-코스닥", "/tmp/chart_kosdaq.png")
+
+    today = dates[-1].strftime("%Y/%m/%d")
+    send_photo("/tmp/chart_yga.png", caption=f"신용거래융자 유가증권 ({today} 기준)")
+    send_photo("/tmp/chart_kosdaq.png", caption=f"신용거래융자 코스닥 ({today} 기준)")
     print("완료")
 
 
