@@ -4,7 +4,7 @@ credit_balance.py v3
 신용공여 잔고 추이(KOFIA FreeSIS) 엑셀 다운로드 후 차트 생성, 텔레그램 전송
 - 페이지가 Angular 기반이라 숫자는 화면의 엑셀 다운로드 버튼을 직접 클릭해서 받음
 - 받은 엑셀의 신용거래융자 유가증권/코스닥 컬럼으로 matplotlib 차트 생성
-- 매일 오전 8시 13분 KST 텔레그램 전송 (평일만)
+- 매일 오후 4시 30분 KST 텔레그램 전송 (평일만)
 """
 import os, re, datetime
 import requests
@@ -60,9 +60,15 @@ EXCEL_BUTTON_SELECTORS = [
 
 # ── 요일 판단 (KST 기준) ────────────────────────────────────────────────────
 
+KST = datetime.timezone(datetime.timedelta(hours=9))
+
+
+def kst_today() -> datetime.date:
+    return datetime.datetime.now(KST).date()
+
+
 def is_kr_business_day() -> bool:
-    kst_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
-    return kst_now.weekday() < 5  # 월=0 ... 금=4, 토=5, 일=6
+    return kst_today().weekday() < 5  # 월=0 ... 금=4, 토=5, 일=6
 
 
 # ── 조회기간 변경 ────────────────────────────────────────────────────────
@@ -223,8 +229,7 @@ def send_text(text: str):
 
 def main():
     if not is_kr_business_day():
-        kst_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
-        print(f"주말({kst_now.strftime('%Y-%m-%d %A')})이라 전송 생략")
+        print(f"주말({kst_today().strftime('%Y-%m-%d %A')})이라 전송 생략")
         return
 
     print("엑셀 다운로드 중...")
@@ -245,10 +250,21 @@ def main():
     plot_chart(dates, yga_vals, "신용거래융자-유가증권", "/tmp/chart_yga.png")
     plot_chart(dates, kosdaq_vals, "신용거래융자-코스닥", "/tmp/chart_kosdaq.png")
 
-    today = dates[-1].strftime("%Y/%m/%d")
+    latest = dates[-1]
     start = dates[0].strftime("%Y/%m/%d")
-    send_photo("/tmp/chart_yga.png", caption=f"신용거래융자 유가증권 ({start} ~ {today})")
-    send_photo("/tmp/chart_kosdaq.png", caption=f"신용거래융자 코스닥 ({start} ~ {today})")
+    end = latest.strftime("%Y/%m/%d")
+
+    # 실행이 밀리거나 공휴일이라 데이터가 안 올라온 경우를 캡션에 그대로 표기
+    gap = (kst_today() - latest).days
+    if gap <= 0:
+        note = ""
+    elif gap == 1:
+        note = " (전일자 기준)"
+    else:
+        note = f" (최신 데이터 {gap}일 전)"
+
+    send_photo("/tmp/chart_yga.png", caption=f"신용거래융자 유가증권 {start} ~ {end}{note}")
+    send_photo("/tmp/chart_kosdaq.png", caption=f"신용거래융자 코스닥 {start} ~ {end}{note}")
     print("완료")
 
 
