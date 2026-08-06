@@ -65,6 +65,25 @@ def is_kr_business_day() -> bool:
     return kst_now.weekday() < 5  # 월=0 ... 금=4, 토=5, 일=6
 
 
+# ── 조회기간 변경 ────────────────────────────────────────────────────────
+
+def set_period_6months(page):
+    """조회기간을 6개월로 바꾸고 조회 버튼 클릭, 실패하면 기본 기간으로 진행"""
+    try:
+        page.locator("text=조회기간").first.locator(
+            "xpath=following::div[contains(@class,'cl-combobox-button')][1]"
+        ).click()
+        page.wait_for_timeout(500)
+        page.locator("text=6개월").first.click()
+        page.wait_for_timeout(300)
+        page.locator("text=조회").first.click()
+        page.wait_for_load_state("networkidle", timeout=15000)
+        page.wait_for_timeout(2000)
+        print("조회기간 6개월로 변경 완료")
+    except Exception as e:
+        print(f"[조회기간 변경 실패, 기본 기간으로 진행] {e}")
+
+
 # ── 엑셀 다운로드 ────────────────────────────────────────────────────────
 
 def download_excel() -> None:
@@ -73,6 +92,8 @@ def download_excel() -> None:
         page = browser.new_page(viewport={"width": 1400, "height": 1200})
         page.goto(URL, wait_until="networkidle", timeout=30000)
         page.wait_for_timeout(3000)  # 데이터 로딩 대기
+
+        set_period_6months(page)
 
         # 버튼이 늦게 뜰 수 있어서 1초 간격으로 최대 10번 재시도
         button = None
