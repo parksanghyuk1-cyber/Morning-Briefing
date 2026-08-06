@@ -41,7 +41,11 @@ DUMP_JS = """
 """
 
 # 엑셀 다운로드 버튼 후보 셀렉터, 위에서부터 순서대로 시도
+# 실제 버튼의 title 속성은 "EXCEL저장" (영문 EXCEL) 이었음, 확인 완료
 EXCEL_BUTTON_SELECTORS = [
+    "[title='EXCEL저장']",
+    "[title*='EXCEL']",
+    "[title*='excel' i]",
     "[title*='엑셀']",
     "[aria-label*='엑셀']",
     "[alt*='엑셀']",
