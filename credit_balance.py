@@ -67,6 +67,18 @@ def is_kr_business_day() -> bool:
 
 # ── 조회기간 변경 ────────────────────────────────────────────────────────
 
+PERIOD_DUMP_JS = """
+() => {
+    const label = Array.from(document.querySelectorAll('*'))
+        .find(el => el.children.length === 0 && el.textContent.trim() === '조회기간');
+    if (!label) return '조회기간 라벨 요소를 못 찾음';
+    let box = label;
+    for (let i = 0; i < 4 && box.parentElement; i++) box = box.parentElement;
+    return box.outerHTML.slice(0, 3000);
+}
+"""
+
+
 def set_period_6months(page):
     """조회기간을 6개월로 바꾸고 조회 버튼 클릭, 실패하면 기본 기간으로 진행"""
     try:
@@ -82,6 +94,11 @@ def set_period_6months(page):
         print("조회기간 6개월로 변경 완료")
     except Exception as e:
         print(f"[조회기간 변경 실패, 기본 기간으로 진행] {e}")
+        try:
+            dump = page.evaluate(PERIOD_DUMP_JS)
+        except Exception:
+            dump = "(구조 덤프도 실패)"
+        send_text(f"조회기간 변경 실패, 기본 기간으로 진행함: {e}\n\n{dump}")
 
 
 # ── 엑셀 다운로드 ────────────────────────────────────────────────────────
