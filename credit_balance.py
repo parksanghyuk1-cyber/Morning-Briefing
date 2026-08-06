@@ -48,15 +48,19 @@ def download_excel() -> None:
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 1400, "height": 1200})
         page.goto(URL, wait_until="networkidle", timeout=30000)
-        page.wait_for_selector("text=신용거래융자", timeout=15000)
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(3000)  # 데이터 로딩 대기
 
+        # 버튼이 늦게 뜰 수 있어서 1초 간격으로 최대 10번 재시도
         button = None
-        for sel in EXCEL_BUTTON_SELECTORS:
-            loc = page.locator(sel)
-            if loc.count() > 0:
-                button = loc.first
+        for _ in range(10):
+            for sel in EXCEL_BUTTON_SELECTORS:
+                loc = page.locator(sel)
+                if loc.count() > 0 and loc.first.is_visible():
+                    button = loc.first
+                    break
+            if button:
                 break
+            page.wait_for_timeout(1000)
 
         if button is None:
             page.screenshot(path=DEBUG_SHOT, full_page=True)
