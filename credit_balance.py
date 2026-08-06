@@ -91,14 +91,16 @@ def set_period_6months(page):
         page.locator("text=조회").first.click()
         page.wait_for_load_state("networkidle", timeout=15000)
         page.wait_for_timeout(2000)
-        print("조회기간 6개월로 변경 완료")
+        print("조회기간 6개월로 변경 시도 완료")
     except Exception as e:
-        print(f"[조회기간 변경 실패, 기본 기간으로 진행] {e}")
-        try:
-            dump = page.evaluate(PERIOD_DUMP_JS)
-        except Exception:
-            dump = "(구조 덤프도 실패)"
-        send_text(f"조회기간 변경 실패, 기본 기간으로 진행함: {e}\n\n{dump}")
+        print(f"[조회기간 변경 중 오류, 기본 기간으로 진행] {e}")
+
+    # 성공 여부와 무관하게 실제 상태를 이번엔 무조건 확인해서 보냄, 확인되면 이 부분은 뺄 예정
+    try:
+        dump = page.evaluate(PERIOD_DUMP_JS)
+    except Exception:
+        dump = "(구조 덤프도 실패)"
+    send_text(f"[조회기간 상태 확인용, 디버그]\n{dump}")
 
 
 # ── 엑셀 다운로드 ────────────────────────────────────────────────────────
