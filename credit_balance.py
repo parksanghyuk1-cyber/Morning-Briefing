@@ -1,5 +1,5 @@
 """
-credit_balance.py v2
+credit_balance.py v3
 ──────────────────────
 신용공여 잔고 추이(KOFIA FreeSIS) 엑셀 다운로드 후 차트 생성, 텔레그램 전송
 - 페이지가 Angular 기반이라 숫자는 화면의 엑셀 다운로드 버튼을 직접 클릭해서 받음
@@ -19,6 +19,26 @@ from playwright.sync_api import sync_playwright
 URL = "https://freesis.kofia.or.kr/stat/FreeSIS.do?parentDivId=MSIS10000000000000&serviceId=STATSCU0100000070"
 XLSX_PATH = "/tmp/credit_balance.xlsx"
 DEBUG_SHOT = "/tmp/debug_page.png"
+DEBUG_DUMP = "/tmp/debug_elements.txt"
+
+# 실패 시 후보가 될 만한 요소들을 텍스트로 그대로 긁어오는 JS, 스크린샷보다 훨씬 정확함
+DUMP_JS = """
+() => {
+    const els = Array.from(document.querySelectorAll(
+        'img, button, a, i, [role="button"], span[class*="ico"], div[class*="btn"], div[class*="excel" i]'
+    ));
+    return els.map(el => {
+        const cls = (el.className && typeof el.className === 'string') ? el.className : '';
+        const title = el.title || '';
+        const alt = el.getAttribute('alt') || '';
+        const aria = el.getAttribute('aria-label') || '';
+        const src = el.getAttribute('src') || '';
+        const text = (el.innerText || '').trim().slice(0, 15);
+        if (!cls && !title && !alt && !aria && !src && !text) return null;
+        return `${el.tagName}|cls=${cls}|title=${title}|alt=${alt}|aria=${aria}|src=${src}|text=${text}`;
+    }).filter(Boolean).slice(0, 120).join('\\n');
+}
+"""
 
 # 엑셀 다운로드 버튼 후보 셀렉터, 위에서부터 순서대로 시도
 EXCEL_BUTTON_SELECTORS = [
@@ -63,6 +83,9 @@ def download_excel() -> None:
             page.wait_for_timeout(1000)
 
         if button is None:
+            dump = page.evaluate(DUMP_JS)
+            with open(DEBUG_DUMP, "w", encoding="utf-8") as f:
+                f.write(dump)
             page.screenshot(path=DEBUG_SHOT, full_page=True)
             browser.close()
             raise RuntimeError("엑셀 다운로드 버튼을 찾지 못함")
@@ -149,7 +172,8 @@ def send_text(text: str):
     if not token or not chat_id:
         return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=15)
+    for i in range(0, len(text), 3500):
+        requests.post(url, data={"chat_id": chat_id, "text": text[i:i + 3500]}, timeout=15)
 
 
 def main():
@@ -163,10 +187,12 @@ def main():
         download_excel()
         dates, yga_vals, kosdaq_vals = parse_xlsx()
     except Exception as e:
+        send_text(f"신용잔고 캡처 실패: {e}")
+        if os.path.exists(DEBUG_DUMP):
+            with open(DEBUG_DUMP, encoding="utf-8") as f:
+                send_text(f.read())
         if os.path.exists(DEBUG_SHOT):
-            send_photo(DEBUG_SHOT, caption=f"신용잔고 캡처 실패: {e}")
-        else:
-            send_text(f"신용잔고 캡처 실패: {e}")
+            send_photo(DEBUG_SHOT, caption="실패 시점 화면")
         raise
 
     print(f"데이터 {len(dates)}건 확보, 차트 생성 중...")
