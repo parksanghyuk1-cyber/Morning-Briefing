@@ -67,40 +67,30 @@ def is_kr_business_day() -> bool:
 
 # ── 조회기간 변경 ────────────────────────────────────────────────────────
 
-PERIOD_DUMP_JS = """
-() => {
-    const label = Array.from(document.querySelectorAll('*'))
-        .find(el => el.children.length === 0 && el.textContent.trim() === '조회기간');
-    if (!label) return '조회기간 라벨 요소를 못 찾음';
-    let box = label;
-    for (let i = 0; i < 4 && box.parentElement; i++) box = box.parentElement;
-    return box.outerHTML.slice(0, 3000);
-}
-"""
-
-
 def set_period_6months(page):
     """조회기간을 6개월로 바꾸고 조회 버튼 클릭, 실패하면 기본 기간으로 진행"""
     try:
-        page.locator("text=조회기간").first.locator(
-            "xpath=following::div[contains(@class,'cl-combobox-button')][1]"
-        ).click()
-        page.wait_for_timeout(500)
-        page.locator("text=6개월").first.click()
-        page.wait_for_timeout(300)
-        page.locator("text=조회").first.click()
-        page.wait_for_load_state("networkidle", timeout=15000)
-        page.wait_for_timeout(2000)
-        print("조회기간 6개월로 변경 시도 완료")
-    except Exception as e:
-        print(f"[조회기간 변경 중 오류, 기본 기간으로 진행] {e}")
+        # 콤보박스마다 title 속성이 붙어있음, 위치 기반보다 이게 정확함
+        combo = page.locator("div.cl-combobox[title='조회기간']").first
+        combo.locator(".cl-combobox-button").click()
+        page.wait_for_timeout(800)
 
-    # 성공 여부와 무관하게 실제 상태를 이번엔 무조건 확인해서 보냄, 확인되면 이 부분은 뺄 예정
-    try:
-        dump = page.evaluate(PERIOD_DUMP_JS)
-    except Exception:
-        dump = "(구조 덤프도 실패)"
-    send_text(f"[조회기간 상태 확인용, 디버그]\n{dump}")
+        # 드롭다운 목록에서 정확히 '6개월' 항목만 선택
+        page.get_by_text("6개월", exact=True).first.click()
+        page.wait_for_timeout(500)
+
+        # 조회 버튼, 다른 '조회' 포함 텍스트와 안 섞이게 정확히 매칭
+        page.get_by_text("조회", exact=True).first.click()
+        page.wait_for_load_state("networkidle", timeout=15000)
+        page.wait_for_timeout(2500)
+
+        selected = combo.inner_text().strip()
+        print(f"조회기간 선택값: {selected}")
+        if "6개월" not in selected:
+            send_text(f"조회기간이 6개월로 안 바뀜, 현재값: {selected}")
+    except Exception as e:
+        print(f"[조회기간 변경 실패, 기본 기간으로 진행] {e}")
+        send_text(f"조회기간 6개월 변경 실패, 기본 기간으로 진행함: {e}")
 
 
 # ── 엑셀 다운로드 ────────────────────────────────────────────────────────
@@ -245,8 +235,9 @@ def main():
     plot_chart(dates, kosdaq_vals, "신용거래융자-코스닥", "/tmp/chart_kosdaq.png")
 
     today = dates[-1].strftime("%Y/%m/%d")
-    send_photo("/tmp/chart_yga.png", caption=f"신용거래융자 유가증권 ({today} 기준)")
-    send_photo("/tmp/chart_kosdaq.png", caption=f"신용거래융자 코스닥 ({today} 기준)")
+    start = dates[0].strftime("%Y/%m/%d")
+    send_photo("/tmp/chart_yga.png", caption=f"신용거래융자 유가증권 ({start} ~ {today})")
+    send_photo("/tmp/chart_kosdaq.png", caption=f"신용거래융자 코스닥 ({start} ~ {today})")
     print("완료")
 
 
