@@ -19,10 +19,13 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Install Korean font
+        run: sudo apt-get update && sudo apt-get install -y fonts-nanum
+
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install playwright
+          pip install playwright openpyxl matplotlib
 
       - name: Install Chromium
         run: playwright install --with-deps chromium
