@@ -70,21 +70,32 @@ def is_kr_business_day() -> bool:
 def set_period_6months(page):
     """조회기간을 6개월로 바꾸고 조회 버튼 클릭, 실패하면 기본 기간으로 진행"""
     try:
-        # 콤보박스마다 title 속성이 붙어있음, 위치 기반보다 이게 정확함
-        combo = page.locator("div.cl-combobox[title='조회기간']").first
-        combo.locator(".cl-combobox-button").click()
-        page.wait_for_timeout(800)
+        # title 속성이 콤보박스마다 일정하지 않아서, 현재 표시값으로 대상을 찾음
+        combos = page.locator("div.cl-combobox")
+        target = None
+        for i in range(combos.count()):
+            c = combos.nth(i)
+            try:
+                if "개월" in c.inner_text():
+                    target = c
+                    break
+            except Exception:
+                continue
 
-        # 드롭다운 목록에서 정확히 '6개월' 항목만 선택
-        page.get_by_text("6개월", exact=True).first.click()
+        if target is None:
+            send_text("조회기간 콤보박스를 못 찾음, 기본 기간으로 진행")
+            return
+
+        target.click()
+        page.wait_for_timeout(800)
+        page.get_by_text("6개월", exact=True).first.click(timeout=10000)
         page.wait_for_timeout(500)
 
-        # 조회 버튼, 다른 '조회' 포함 텍스트와 안 섞이게 정확히 매칭
-        page.get_by_text("조회", exact=True).first.click()
+        page.get_by_text("조회", exact=True).first.click(timeout=10000)
         page.wait_for_load_state("networkidle", timeout=15000)
         page.wait_for_timeout(2500)
 
-        selected = combo.inner_text().strip()
+        selected = target.inner_text().strip()
         print(f"조회기간 선택값: {selected}")
         if "6개월" not in selected:
             send_text(f"조회기간이 6개월로 안 바뀜, 현재값: {selected}")
