@@ -2,7 +2,7 @@ name: Credit Balance Chart
 
 on:
   schedule:
-    - cron: '13 23 * * 0-4'   # 평일 오전 8시 13분 KST
+    - cron: '30 7 * * 1-5'   # 평일 오후 4시 30분 KST
   workflow_dispatch:
 
 jobs:
