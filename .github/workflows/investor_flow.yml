@@ -1,0 +1,47 @@
+name: investor_flow
+
+on:
+  schedule:
+    - cron: "0 10 * * 1-5"   # UTC 10:00 = KST 19:00, 평일
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 한글 폰트 설치
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-nanum
+          sudo fc-cache -fv
+          rm -rf ~/.cache/matplotlib
+
+      - name: 패키지 설치
+        run: |
+          pip install --quiet pykrx pandas matplotlib requests
+
+      - name: 리포트 실행
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          KRX_ID: ${{ secrets.KRX_ID }}
+          KRX_PW: ${{ secrets.KRX_PW }}
+          TZ: Asia/Seoul
+        run: python investor_flow.py
+
+      - name: CSV 커밋
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add data/investor_flow.csv
+          git diff --staged --quiet || git commit -m "data: $(date +%Y-%m-%d)"
+          git push
