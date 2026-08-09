@@ -32,6 +32,7 @@ CHUNK_SLEEP = 3      # 청크 사이 대기 초
 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
+FORCE_SEND = os.environ.get("FORCE_SEND", "").lower() in ("1", "true", "yes")
 
 INSTITUTION_PARTS = ["금융투자", "보험", "투신", "사모", "은행", "기타금융", "연기금"]
 FOREIGN_PARTS = ["외국인", "기타외국인"]
@@ -47,15 +48,22 @@ COLORS = {
 # ------------------------------------------------------------------
 # 데이터 수집
 # ------------------------------------------------------------------
-def check_krx_login():
+def check_env():
     """
     KRX 정보데이터시스템이 2025-12-27부터 회원제로 전환됨
     로그인 없이는 JSON 대신 로그아웃 페이지가 내려와서 파싱이 터짐
     """
-    if not os.environ.get("KRX_ID") or not os.environ.get("KRX_PW"):
+    missing = [k for k in ("KRX_ID", "KRX_PW") if not os.environ.get(k)]
+    if missing:
         raise RuntimeError(
-            "KRX_ID, KRX_PW 미설정. data.krx.co.kr 회원가입 후 "
+            f"{', '.join(missing)} 미설정. data.krx.co.kr 회원가입 후 "
             "리포지토리 Secrets에 등록 필요 (가입 및 조회 모두 무료)"
+        )
+
+    missing = [k for k in ("TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID") if not os.environ.get(k)]
+    if missing:
+        raise RuntimeError(
+            f"{', '.join(missing)} 미설정. Secrets 이름이 정확히 일치하는지 확인 필요"
         )
 
 
@@ -134,12 +142,13 @@ def save_csv(df):
 def update():
     """
     CSV가 없으면 전 기간 백필, 있으면 최근 데이터만 append
-    신규 데이터 없으면 (None, None) 반환
+    직전 실행 대비 새 거래일이 붙었을 때만 발송, 없으면 (None, None)
     """
     hist = load_csv()
     now = datetime.now()
     today = now.strftime("%Y%m%d")
     first_run = hist.empty
+    prev_latest = None if first_run else hist["date"].max()
 
     if first_run:
         start = (now - timedelta(days=int(BACKFILL_MONTHS * 30.5))).strftime("%Y%m%d")
@@ -151,14 +160,21 @@ def update():
         [fetch_range(start, today, mkt) for mkt in MARKETS], ignore_index=True
     )
     if new.empty:
+        if not first_run and FORCE_SEND:
+            print("신규 조회분 없음, 기존 CSV로 강제 발송")
+            return hist, hist["date"].max()
         print("조회 결과 없음, 종료")
         return None, None
 
     merged = save_csv(pd.concat([hist, new], ignore_index=True))
     latest = merged["date"].max()
 
-    if not first_run and latest.strftime("%Y%m%d") != today:
-        print(f"휴장 또는 데이터 미갱신 (최신 {latest.date()}), 발송 없이 종료")
+    if FORCE_SEND:
+        print(f"강제 발송 모드, 최신 {latest.date()}")
+        return merged, latest
+
+    if not first_run and latest <= prev_latest:
+        print(f"신규 거래일 없음 (최신 {latest.date()}), 발송 없이 종료")
         return None, None
 
     return merged, latest
@@ -269,15 +285,15 @@ def build_caption(frames, asof):
         f = frames[key]["외국인"]
         d1, d5, d20 = f.iloc[-1], f.tail(5).sum(), f.tail(20).sum()
         lines.append(
-            f"{key} 외국인 {d1:+,.0f}억 (5일 {d5:+,.0f} / 20일 {d20:+,.0f})"
+            f"{key} 외국인 {d1:+,.0f}억원 (5일 {d5:+,.0f}억원 / 20일 {d20:+,.0f}억원)"
         )
     lines.append("")
     for key in ["KOSPI", "KOSDAQ"]:
         g = frames[key]
         lines.append(
-            f"{key} 당일 개인 {g['개인'].iloc[-1]:+,.0f} / "
-            f"기관 {g['기관'].iloc[-1]:+,.0f} / "
-            f"연기금 {g['연기금'].iloc[-1]:+,.0f}"
+            f"{key} 당일 개인 {g['개인'].iloc[-1]:+,.0f}억원 / "
+            f"기관 {g['기관'].iloc[-1]:+,.0f}억원 / "
+            f"연기금 {g['연기금'].iloc[-1]:+,.0f}억원"
         )
     return "\n".join(lines)
 
@@ -329,7 +345,7 @@ def send_error(msg):
 
 # ------------------------------------------------------------------
 def main():
-    check_krx_login()
+    check_env()
     setup_font()
     os.makedirs(OUT_DIR, exist_ok=True)
 
