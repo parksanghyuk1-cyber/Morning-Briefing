@@ -27,6 +27,8 @@ MARKETS = ["KOSPI", "KOSDAQ"]
 ROLL_MONTHS = 24
 BACKFILL_MONTHS = 25  # 롤링 24개월 + 여유 1개월, 최초 실행 시에만 사용
 UNIT = 1e8  # 원 -> 억원
+CHUNK_DAYS = 180     # 장기 구간 분할 단위
+CHUNK_SLEEP = 3      # 청크 사이 대기 초
 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -45,8 +47,20 @@ COLORS = {
 # ------------------------------------------------------------------
 # 데이터 수집
 # ------------------------------------------------------------------
-def fetch_range(fromdate, todate, market, retries=4):
-    """KRX 투자자별 순매수 대금 조회, 억원 단위 반환"""
+def check_krx_login():
+    """
+    KRX 정보데이터시스템이 2025-12-27부터 회원제로 전환됨
+    로그인 없이는 JSON 대신 로그아웃 페이지가 내려와서 파싱이 터짐
+    """
+    if not os.environ.get("KRX_ID") or not os.environ.get("KRX_PW"):
+        raise RuntimeError(
+            "KRX_ID, KRX_PW 미설정. data.krx.co.kr 회원가입 후 "
+            "리포지토리 Secrets에 등록 필요 (가입 및 조회 모두 무료)"
+        )
+
+
+def fetch_chunk(fromdate, todate, market, retries=4):
+    """단일 구간 조회, 억원 단위 반환"""
     last_err = None
     for i in range(retries):
         try:
@@ -54,7 +68,7 @@ def fetch_range(fromdate, todate, market, retries=4):
                 fromdate, todate, market, detail=True
             )
             if df is None or df.empty:
-                raise ValueError("빈 응답")
+                raise ValueError("빈 응답 (로그인 세션 확인 필요)")
 
             out = pd.DataFrame(index=df.index)
             out["개인"] = df["개인"]
@@ -74,8 +88,29 @@ def fetch_range(fromdate, todate, market, retries=4):
             return out.reset_index()
         except Exception as e:
             last_err = e
-            time.sleep(3 * (i + 1))
-    raise RuntimeError(f"{market} 조회 실패: {last_err}")
+            time.sleep(5 * (i + 1))
+    raise RuntimeError(f"{market} {fromdate}~{todate} 조회 실패: {last_err}")
+
+
+def fetch_range(fromdate, todate, market):
+    """
+    긴 구간은 6개월 청크로 쪼개서 순차 조회
+    KRX가 과도한 접속에 대해 계정 단위 차단을 하므로 사이에 텀을 둠
+    """
+    start = datetime.strptime(fromdate, "%Y%m%d")
+    end = datetime.strptime(todate, "%Y%m%d")
+
+    parts, cursor = [], start
+    while cursor <= end:
+        chunk_end = min(cursor + timedelta(days=CHUNK_DAYS), end)
+        parts.append(
+            fetch_chunk(cursor.strftime("%Y%m%d"), chunk_end.strftime("%Y%m%d"), market)
+        )
+        cursor = chunk_end + timedelta(days=1)
+        if cursor <= end:
+            time.sleep(CHUNK_SLEEP)
+
+    return pd.concat(parts, ignore_index=True)
 
 
 def load_csv():
@@ -194,7 +229,8 @@ def chart_all_investors(frames, path, asof):
             ax.plot(d.index, d[col], label=col, color=COLORS[col], linewidth=1.4)
         ax.set_title(key, fontsize=11, fontweight="bold", pad=8)
         fmt_axis(ax)
-    axes[0].legend(fontsize=8, ncol=2, frameon=False, loc="best")
+        ax.legend(fontsize=8, ncol=2, loc="best",
+                  framealpha=0.8, edgecolor="none")
     fig.suptitle(
         f"투자자별 누적 순매수 (억원, 최근 {ROLL_MONTHS}개월)   기준일 {asof}",
         fontsize=13, fontweight="bold", y=0.98,
@@ -214,7 +250,7 @@ def chart_foreign(frames, path, asof):
         ax.plot(ma.index, ma, color="#0070c0", linewidth=1.6, label="4w ma")
         ax.set_title(key, fontsize=11, fontweight="bold", pad=8)
         fmt_axis(ax)
-    axes[0].legend(fontsize=8, frameon=False, loc="best")
+        ax.legend(fontsize=8, loc="best", framealpha=0.8, edgecolor="none")
     fig.suptitle(
         f"외국인 누적 순매수 주간 (억원, 최근 {ROLL_MONTHS}개월)   기준일 {asof}",
         fontsize=13, fontweight="bold", y=0.98,
@@ -274,8 +310,26 @@ def send(paths, caption):
     print("발송 완료")
 
 
+def send_error(msg):
+    """실패를 조용히 넘기지 않고 텔레그램으로 알림"""
+    if not TG_TOKEN or not TG_CHAT:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+            data={
+                "chat_id": TG_CHAT,
+                "text": f"investor_flow 실패\n\n{msg}"[:4000],
+            },
+            timeout=30,
+        )
+    except Exception:
+        pass
+
+
 # ------------------------------------------------------------------
 def main():
+    check_krx_login()
     setup_font()
     os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -295,4 +349,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        send_error(f"{type(e).__name__}: {e}")
+        raise
