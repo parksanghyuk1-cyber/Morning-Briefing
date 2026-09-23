@@ -8,7 +8,7 @@
 
 ## 구성
 
-| 브리핑 | 발송 시간 (KST, 평일) | 내용 | 데이터 출처 |
+| 브리핑 | 발송 시간 (KST, 주말·공휴일 제외) | 내용 | 데이터 출처 |
 |---|---|---|---|
 | 글로벌 매크로 대시보드 | 07:00 | 미국채 금리, 달러인덱스, 원/달러, VIX, 주요 선물, 코스피/코스닥, 유가, 금, 구리, 가상자산 등락 및 AI 시장 코멘트 | yfinance, 네이버 금융, Gemini 2.5 Flash |
 | 신용잔고 추이 | 16:30 | 유가증권시장 및 코스닥 신용거래융자 잔고 6개월 추이 차트 | 금융투자협회 FreeSIS |
@@ -32,6 +32,7 @@ GitHub Actions (스케줄 실행)
 ```
 
 - 별도 서버 없이 GitHub Actions 스케줄러로 매일 자동 실행됩니다
+- 설날, 추석 같은 음력 명절과 대체공휴일, 연말 휴장일에는 발송하지 않습니다 (`kr_calendar.py`)
 - 투자자별 수급 데이터는 CSV로 누적 저장해 매일 신규 거래일분만 추가 수집합니다
 - 지표별로 임계치를 설정해 평소보다 크게 움직인 지표를 따로 표시합니다
 - API 키와 계정 정보는 모두 GitHub Secrets로 관리합니다
@@ -64,5 +65,6 @@ Python, GitHub Actions, yfinance, pykrx, Playwright, pandas, matplotlib, Google 
 dashboard.py         글로벌 매크로 대시보드
 credit_balance.py    신용잔고 추이 차트
 investor_flow.py     투자자별 누적 순매수 차트
+kr_calendar.py       한국 영업일 판단 (주말, 공휴일, 연말 휴장일)
 data/                수급 데이터 누적 저장
 ```

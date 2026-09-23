@@ -4,7 +4,7 @@ credit_balance.py v3
 신용공여 잔고 추이(KOFIA FreeSIS) 엑셀 다운로드 후 차트 생성, 텔레그램 전송
 - 페이지가 Angular 기반이라 숫자는 화면의 엑셀 다운로드 버튼을 직접 클릭해서 받음
 - 받은 엑셀의 신용거래융자 유가증권/코스닥 컬럼으로 matplotlib 차트 생성
-- 매일 오후 4시 30분 KST 텔레그램 전송 (평일만)
+- 매일 오후 4시 30분 KST 텔레그램 전송 (주말, 공휴일 제외)
 """
 import os, re, datetime
 import requests
@@ -15,6 +15,8 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib.font_manager as fm
 from playwright.sync_api import sync_playwright
+
+from kr_calendar import holiday_name, kst_today
 
 URL = "https://freesis.kofia.or.kr/stat/FreeSIS.do?parentDivId=MSIS10000000000000&serviceId=STATSCU0100000070"
 XLSX_PATH = "/tmp/credit_balance.xlsx"
@@ -56,19 +58,6 @@ EXCEL_BUTTON_SELECTORS = [
     "button:has-text('엑셀')",
     "a:has-text('엑셀')",
 ]
-
-
-# ── 요일 판단 (KST 기준) ────────────────────────────────────────────────────
-
-KST = datetime.timezone(datetime.timedelta(hours=9))
-
-
-def kst_today() -> datetime.date:
-    return datetime.datetime.now(KST).date()
-
-
-def is_kr_business_day() -> bool:
-    return kst_today().weekday() < 5  # 월=0 ... 금=4, 토=5, 일=6
 
 
 # ── 조회기간 변경 ────────────────────────────────────────────────────────
@@ -228,8 +217,10 @@ def send_text(text: str):
 
 
 def main():
-    if not is_kr_business_day():
-        print(f"주말({kst_today().strftime('%Y-%m-%d %A')})이라 전송 생략")
+    today = kst_today()
+    off = holiday_name(today)
+    if off:
+        print(f"{today} {off}이라 전송 생략")
         return
 
     print("엑셀 다운로드 중...")
