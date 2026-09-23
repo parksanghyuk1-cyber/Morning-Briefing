@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '30 7 * * 1-5'   # 평일 오후 4시 30분 KST
   workflow_dispatch:
+    inputs:
+      force:
+        description: '주말·공휴일에도 발송'
+        type: boolean
+        default: false
 
 jobs:
   credit_balance:
@@ -34,6 +39,7 @@ jobs:
         env:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FORCE_SEND:       ${{ inputs.force }}
         run: python credit_balance.py
 
       - name: Notify on failure

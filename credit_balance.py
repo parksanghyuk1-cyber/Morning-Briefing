@@ -18,8 +18,12 @@ from playwright.sync_api import sync_playwright
 
 from kr_calendar import holiday_name, kst_today
 
+# 수동 실행 테스트용, 휴일에도 발송
+FORCE_SEND = os.environ.get("FORCE_SEND", "").lower() in ("1", "true", "yes")
+
 URL = "https://freesis.kofia.or.kr/stat/FreeSIS.do?parentDivId=MSIS10000000000000&serviceId=STATSCU0100000070"
 XLSX_PATH = "/tmp/credit_balance.xlsx"
+CHART_PATH = "/tmp/chart_credit.png"
 DEBUG_SHOT = "/tmp/debug_page.png"
 DEBUG_DUMP = "/tmp/debug_elements.txt"
 
@@ -169,24 +173,25 @@ def setup_korean_font():
     plt.rcParams["axes.unicode_minus"] = False
 
 
-def plot_chart(dates: list, values: list, label: str, path: str):
-    fig, ax = plt.subplots(figsize=(9, 5.2))
-    ax.plot(dates, values, color="#8B2FC9", linewidth=1.8)
-    ax.set_ylim(min(values) * 0.9, max(values) * 1.05)
-    ax.grid(axis="y", color="#e5e5e5", linewidth=0.8)
-    ax.spines[["top", "right", "left"]].set_visible(False)
-    ax.spines["bottom"].set_color("#dddddd")
-    ax.yaxis.set_major_formatter(lambda x, _: f"{int(x):,}")
-    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y%m%d"))
-    plt.xticks(rotation=90, fontsize=8)
-    plt.yticks(fontsize=8)
-    ax.tick_params(length=0)
-    ax.plot([], [], "o", color="#8B2FC9", label=label)
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), frameon=False, fontsize=9)
-    plt.tight_layout()
-    plt.savefig(path, dpi=150, facecolor="white")
-    plt.close()
+def plot_combined(dates: list, panels: list, path: str):
+    """panels: [(제목, 값 리스트), ...] 를 위아래로 쌓은 차트 한 장
+    시장별 잔고 규모 차이가 커서 한 축에 겹치지 않고 칸마다 자기 눈금 사용"""
+    fig, axes = plt.subplots(len(panels), 1, figsize=(9, 4.6 * len(panels)), sharex=True)
+    for ax, (title, values) in zip(axes, panels):
+        ax.plot(dates, values, color="#8B2FC9", linewidth=1.8)
+        ax.set_ylim(min(values) * 0.9, max(values) * 1.05)
+        ax.set_title(title, loc="left", fontsize=11, fontweight="bold", pad=8)
+        ax.grid(axis="y", color="#e5e5e5", linewidth=0.8)
+        ax.spines[["top", "right", "left"]].set_visible(False)
+        ax.spines["bottom"].set_color("#dddddd")
+        ax.yaxis.set_major_formatter(lambda x, _: f"{int(x):,}")
+        ax.tick_params(length=0, labelsize=8)
+    axes[-1].xaxis.set_major_locator(mdates.AutoDateLocator())
+    axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%Y%m%d"))
+    plt.setp(axes[-1].get_xticklabels(), rotation=90)
+    fig.tight_layout(h_pad=2.5)
+    fig.savefig(path, dpi=150, facecolor="white")
+    plt.close(fig)
 
 
 # ── 텔레그램 전송 ────────────────────────────────────────────────────────
@@ -219,7 +224,7 @@ def send_text(text: str):
 def main():
     today = kst_today()
     off = holiday_name(today)
-    if off:
+    if off and not FORCE_SEND:
         print(f"{today} {off}이라 전송 생략")
         return
 
@@ -238,8 +243,11 @@ def main():
 
     print(f"데이터 {len(dates)}건 확보, 차트 생성 중...")
     setup_korean_font()
-    plot_chart(dates, yga_vals, "신용거래융자-유가증권", "/tmp/chart_yga.png")
-    plot_chart(dates, kosdaq_vals, "신용거래융자-코스닥", "/tmp/chart_kosdaq.png")
+    plot_combined(
+        dates,
+        [("신용거래융자 · 유가증권", yga_vals), ("신용거래융자 · 코스닥", kosdaq_vals)],
+        CHART_PATH,
+    )
 
     latest = dates[-1]
     start = dates[0].strftime("%Y/%m/%d")
@@ -254,8 +262,7 @@ def main():
     else:
         note = f" (최신 데이터 {gap}일 전)"
 
-    send_photo("/tmp/chart_yga.png", caption=f"신용거래융자 유가증권 {start} ~ {end}{note}")
-    send_photo("/tmp/chart_kosdaq.png", caption=f"신용거래융자 코스닥 {start} ~ {end}{note}")
+    send_photo(CHART_PATH, caption=f"신용거래융자 유가증권 · 코스닥 {start} ~ {end}{note}")
     print("완료")
 
 
