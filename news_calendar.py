@@ -103,7 +103,8 @@ def _collect_articles(hours: int) -> list[dict]:
                 if title.lower() in seen:
                     continue
                 seen.add(title.lower())
-                articles.append({"source": source, "title": title, "summary": summary})
+                link = (item.findtext("link") or "").strip()
+                articles.append({"source": source, "title": title, "summary": summary, "link": link})
                 count += 1
                 if count >= PER_FEED:
                     break
@@ -181,7 +182,10 @@ def format_headlines(picks: list[dict]) -> list[str]:
     """텔레그램 HTML 메시지용 줄"""
     lines = []
     for i, p in enumerate(picks, 1):
-        lines.append(f"{i}. {html.escape(p['title'], quote=False)} ({p['source']})")
+        title = html.escape(p["title"], quote=False)
+        if p.get("link", "").startswith("http"):
+            title = f'<a href="{html.escape(p["link"])}">{title}</a>'
+        lines.append(f"{i}. {title} ({p['source']})")
         if p["explain"]:
             lines.append(f"   └ {html.escape(p['explain'], quote=False)}")
     return lines
