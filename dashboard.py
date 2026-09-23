@@ -6,11 +6,11 @@ dashboard.py v7
 - Gemini 2.5 Flash: 시장 코멘트
 - 매일 오전 7시 KST 텔레그램 전송 (주말, 공휴일 제외)
 """
-import os, re, json, html, datetime, requests
+import os, re, json, datetime, requests
 import yfinance as yf
 
 from kr_calendar import holiday_name, kst_today
-from news_calendar import get_headlines, get_upcoming_events
+from news_calendar import get_headlines, format_headlines, get_upcoming_events
 
 # 수동 실행 테스트용, 휴일에도 발송
 FORCE_SEND = os.environ.get("FORCE_SEND", "").lower() in ("1", "true", "yes")
@@ -234,7 +234,7 @@ def get_ai_commentary(market_data: str, anomalies: list[str],
         if anomalies else ""
     )
     news_section = (
-        "\n[주요 뉴스 헤드라인]\n" + "\n".join(f"- {html.unescape(h)}" for h in headlines)
+        "\n[주요 뉴스 헤드라인]\n" + "\n".join(f"- {h}" for h in headlines)
         if headlines else ""
     )
     events_section = (
@@ -307,14 +307,15 @@ def build_dashboard() -> str:
     L.append(b("🌍 글로벌 매크로 대시보드"))
     L.append(f"🕒 기준 시각: {time_str} (KST)")
 
-    headlines = get_headlines()
-    if headlines:
+    news = get_headlines()
+    headlines = [f"({n['source']}) {n['title']}" for n in news]  # Gemini 코멘트용
+    if news:
         L.append(""); L.append(b("📰 오늘의 핵심 이슈"))
-        L.extend(f"{i}. {h} (CNBC)" for i, h in enumerate(headlines, 1))
+        L.extend(format_headlines(news))
 
     events = get_upcoming_events()
     if events:
-        L.append(""); L.append(b("🗓️ 주요 일정 (미국 현지 발표일)"))
+        L.append(""); L.append(b("🗓️ 주요 일정 (미국 현지 발표일 · 중요도)"))
         L.extend(events)
 
     L.append(""); L.append(b("🔑 핵심 지표 (금리/달러)"))
