@@ -4,10 +4,12 @@ dashboard.py v7
 글로벌 매크로 대시보드
 - yfinance: 시장 데이터
 - Gemini 2.5 Flash: 시장 코멘트
-- 매일 오전 7시 KST 텔레그램 전송 (평일만)
+- 매일 오전 7시 KST 텔레그램 전송 (주말, 공휴일 제외)
 """
 import os, re, json, datetime, requests
 import yfinance as yf
+
+from kr_calendar import holiday_name, kst_today
 
 try:
     from google import genai
@@ -20,7 +22,7 @@ except ImportError:
 # ── 설정 ──────────────────────────────────────────────────────────────────────
 
 TICKER_LABELS = {
-    "^IRX": "미국채 2년금리", "^TNX": "미국채 10년금리", "^TYX": "미국채 30년금리",
+    "^IRX": "미국채 3개월금리", "^TNX": "미국채 10년금리", "^TYX": "미국채 30년금리",
     "DX-Y.NYB": "달러인덱스", "KRW=X": "원/달러",
     "^VIX": "VIX", "BTC-USD": "비트코인", "ETH-USD": "이더리움",
     "ES=F": "S&P500선물", "NQ=F": "나스닥선물", "YM=F": "다우선물", "RTY=F": "러셀2000선물",
@@ -28,8 +30,9 @@ TICKER_LABELS = {
     "CL=F": "WTI유가", "GC=F": "국제금", "HG=F": "구리",
 }
 
+# 금리는 bp, 나머지는 % 기준
 ALERT_THRESHOLDS = {
-    "^IRX": 5.0, "^TNX": 3.0, "^TYX": 3.0,
+    "^IRX": 10.0, "^TNX": 10.0, "^TYX": 10.0,
     "DX-Y.NYB": 1.0, "KRW=X": 1.0,
     "^VIX": 10.0,
     "BTC-USD": 5.0, "ETH-USD": 5.0,
@@ -52,18 +55,9 @@ NAVER_CLOSE_SYMBOL = {
 }
 
 
-# ── 요일 판단 (KST 기준) ────────────────────────────────────────────────────
 # ⚠️ GitHub Actions 러너는 UTC로 동작함
-# 스케줄 cron이 "0 22 * * 1-5" (월~금 22시 UTC) 로 되어있으면
-# 실제로는 화 수 목 금 토 07시 KST에 실행됨 (하루씩 밀림)
-# 워크플로 yml에서 cron을 "0 22 * * 0-4" (일~목 22시 UTC) 로 수정해야
-# 월~금 07시 KST에 정확히 발송됨
-# 아래 is_kr_business_day()는 스케줄이 잘못돼도 주말 오발송만은 막아주는 안전장치임
-
-def is_kr_business_day() -> bool:
-    kst_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
-    return kst_now.weekday() < 5  # 월=0 ... 금=4, 토=5, 일=6
-
+# cron "0 22 * * 0-4" (일~목 22시 UTC) = 월~금 07시 KST
+# 주말과 한국 공휴일 발송 생략은 main()에서 kr_calendar로 판단
 
 # ── 데이터 신선도 체크 ────────────────────────────────────────────────────────
 
@@ -211,15 +205,14 @@ def detect_anomalies(records: list[dict]) -> list[str]:
     for r in records:
         if r["chg"] is None:
             continue
+        threshold = ALERT_THRESHOLDS.get(r["ticker"], DEFAULT_THRESHOLD)
+        if abs(r["chg"]) < threshold:
+            continue
+        direction = "급등" if r["chg"] > 0 else "급락"
         if r["ticker"] in RATE_TICKERS:
-            if abs(r["chg"]) >= 10:
-                direction = "급등" if r["chg"] > 0 else "급락"
-                alerts.append(f"{r['label']} {direction} ({r['chg']:+.1f}bp)")
+            alerts.append(f"{r['label']} {direction} ({r['chg']:+.1f}bp)")
         else:
-            threshold = ALERT_THRESHOLDS.get(r["ticker"], DEFAULT_THRESHOLD)
-            if abs(r["chg"]) >= threshold:
-                direction = "급등" if r["chg"] > 0 else "급락"
-                alerts.append(f"{r['label']} {direction} ({r['chg']:+.2f}%)")
+            alerts.append(f"{r['label']} {direction} ({r['chg']:+.2f}%)")
     return alerts
 
 
@@ -301,7 +294,7 @@ def build_dashboard() -> str:
     L.append(f"🕒 기준 시각: {time_str} (KST)")
 
     L.append(""); L.append(b("🔑 핵심 지표 (금리/달러)"))
-    for ticker, label in [("^IRX", "🇺🇸 미국채 2년"), ("^TNX", "🇺🇸 미국채 10년"), ("^TYX", "🇺🇸 미국채 30년")]:
+    for ticker, label in [("^IRX", "🇺🇸 미국채 3개월"),("^TNX", "🇺🇸 미국채 10년"), ("^TYX", "🇺🇸 미국채 30년")]:
         add(ticker, label, *get_rate(ticker), is_rate=True)
     add("DX-Y.NYB", "💵 달러 인덱스", *get_price("DX-Y.NYB"))
 
@@ -410,9 +403,10 @@ def send_telegram(text: str):
 
 
 def main():
-    if not is_kr_business_day():
-        kst_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
-        print(f"주말({kst_now.strftime('%Y-%m-%d %A')})이라 전송 생략")
+    today = kst_today()
+    off = holiday_name(today)
+    if off:
+        print(f"{today} {off}이라 전송 생략")
         return
 
     print("대시보드 생성 중...")
