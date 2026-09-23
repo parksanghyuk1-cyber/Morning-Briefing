@@ -1,7 +1,9 @@
 """
 대시보드 상단의 [오늘의 핵심 이슈], [주요 일정] 섹션
-- 핵심 이슈: CNBC Top News RSS, 최근 24시간 헤드라인
-- 주요 일정: 향후 2주 미국 주요 지표 발표 및 FOMC
+- 핵심 이슈: 로이터, 블룸버그, WSJ, FT, CNBC 최근 24시간 기사 중
+             Gemini가 시장 영향이 큰 3건을 고르고 한 줄 설명 작성
+             (Gemini 실패 시 매체별 최신 기사를 설명 없이 사용)
+- 주요 일정: 향후 2주 미국 주요 지표 발표 및 FOMC, 중요도 ★ 1~3개
     FRED 발표 일정 (BLS, BEA, Census)  → FRED_API_KEY 필요
     BEA 공식 캘린더                   → FRED 실패 시 대체 (BLS는 자동 접속 차단)
     ISM PMI                          → 제조업 매월 첫 영업일, 서비스업 셋째 영업일
@@ -10,6 +12,7 @@
 import datetime
 import email.utils
 import html
+import json
 import os
 import re
 import xml.etree.ElementTree as ET
@@ -17,10 +20,28 @@ import xml.etree.ElementTree as ET
 import holidays
 import requests
 
-KST = datetime.timezone(datetime.timedelta(hours=9))
-UA = {"User-Agent": "Mozilla/5.0"}
+try:
+    from google import genai
+    from google.genai import types
+    GENAI_AVAILABLE = True
+except ImportError:
+    GENAI_AVAILABLE = False
 
-CNBC_TOP_NEWS = "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114"
+KST = datetime.timezone(datetime.timedelta(hours=9))
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36"}
+
+# (매체, RSS 주소) — 위에 있을수록 Gemini 실패 시 우선 사용
+NEWS_FEEDS = [
+    ("Reuters", "https://news.google.com/rss/search?q=site:reuters.com+when:1d+(markets+OR+economy+OR+fed)"
+                "&hl=en-US&gl=US&ceid=US:en"),
+    ("Bloomberg", "https://feeds.bloomberg.com/markets/news.rss"),
+    ("Bloomberg", "https://feeds.bloomberg.com/economics/news.rss"),
+    ("WSJ", "https://feeds.content.dowjones.io/public/rss/RSSMarketsMain"),
+    ("FT", "https://www.ft.com/markets?format=rss"),
+    ("CNBC", "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114"),
+]
+PER_FEED = 12  # 피드당 후보 기사 수
+
 FRED_RELEASE_DATES = "https://api.stlouisfed.org/fred/releases/dates"
 BEA_ICS = "https://www.bea.gov/news/schedule/ics/online-calendar-subscription.ics"
 FOMC_PAGE = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
@@ -29,17 +50,17 @@ BLS = "U.S. Bureau of Labor Statistics"
 BEA = "U.S. Bureau of Economic Analysis"
 CENSUS = "U.S. Census Bureau"
 
-# FRED release_name → (표시 이름, 발표 기관)
+# 중요도: 3 = 시장 전체 방향을 바꾸는 지표, 2 = 주목할 지표, 1 = 참고
+# FRED release_name → (표시 이름, 발표 기관, 중요도)
 FRED_RELEASES = {
-    "Consumer Price Index": ("미국 CPI 소비자물가", BLS),
-    "Employment Situation": ("미국 고용보고서 (비농업 고용·실업률)", BLS),
-    "Producer Price Index": ("미국 PPI 생산자물가", BLS),
-    "Job Openings and Labor Turnover Survey": ("미국 JOLTS 구인건수", BLS),
-    "Personal Income and Outlays": ("미국 PCE 물가", BEA),
-    "Gross Domestic Product": ("미국 GDP", BEA),
-    "Advance Monthly Sales for Retail and Food Services": ("미국 소매판매", CENSUS),
+    "Consumer Price Index": ("미국 CPI 소비자물가", BLS, 3),
+    "Employment Situation": ("미국 고용보고서 (비농업 고용·실업률)", BLS, 3),
+    "Personal Income and Outlays": ("미국 PCE 물가", BEA, 3),
+    "Gross Domestic Product": ("미국 GDP", BEA, 2),
+    "Producer Price Index": ("미국 PPI 생산자물가", BLS, 2),
+    "Advance Monthly Sales for Retail and Food Services": ("미국 소매판매", CENSUS, 2),
+    "Job Openings and Labor Turnover Survey": ("미국 JOLTS 구인건수", BLS, 1),
 }
-
 GDP_STAGES = {"Advance": "속보치", "Second": "잠정치", "Third": "확정치"}
 
 MONTHS = {m: i for i, m in enumerate(
@@ -48,27 +69,114 @@ MONTHS = {m: i for i, m in enumerate(
 
 # ── 오늘의 핵심 이슈 ─────────────────────────────────────────────────────────
 
-def get_headlines(n: int = 3, hours: int = 24) -> list[str]:
-    """CNBC 편집 순서 그대로 최근 기사 n개, 텔레그램 HTML용으로 escape"""
-    try:
-        resp = requests.get(CNBC_TOP_NEWS, headers=UA, timeout=15)
-        resp.raise_for_status()
-        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
-        titles = []
-        for item in ET.fromstring(resp.content).iter("item"):
-            title = (item.findtext("title") or "").strip()
-            pub = item.findtext("pubDate")
-            if not title or not pub:
-                continue
-            if email.utils.parsedate_to_datetime(pub) < cutoff:
-                continue
-            titles.append(html.escape(title))
-            if len(titles) >= n:
-                break
-        return titles
-    except Exception as e:
-        print(f"[headlines] {e}")
+def _clean(text: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", html.unescape(text or ""))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _collect_articles(hours: int) -> list[dict]:
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
+    articles, seen = [], set()
+    for source, url in NEWS_FEEDS:
+        try:
+            resp = requests.get(url, headers=UA, timeout=15)
+            resp.raise_for_status()
+            count = 0
+            for item in ET.fromstring(resp.content).iter("item"):
+                title = _clean(item.findtext("title"))
+                pub = item.findtext("pubDate")
+                if not title or not pub or email.utils.parsedate_to_datetime(pub) < cutoff:
+                    continue
+                if source == "Reuters":
+                    # 구글 뉴스 제목 끝의 " - Reuters" 제거, 설명란은 링크뿐이라 버림
+                    title, summary = re.sub(r"\s+-\s+Reuters$", "", title), ""
+                else:
+                    summary = _clean(item.findtext("description"))[:300]
+                if title.lower() in seen:
+                    continue
+                seen.add(title.lower())
+                articles.append({"source": source, "title": title, "summary": summary})
+                count += 1
+                if count >= PER_FEED:
+                    break
+        except Exception as e:
+            print(f"[news] {source} 실패: {e}")
+    return articles
+
+
+def _pick_with_gemini(articles: list[dict], n: int) -> list[dict]:
+    if not os.environ.get("GEMINI_API_KEY") or not GENAI_AVAILABLE:
+        raise RuntimeError("Gemini 사용 불가")
+
+    listing = "\n".join(
+        f"[{i}] ({a['source']}) {a['title']}" + (f" — {a['summary']}" if a["summary"] else "")
+        for i, a in enumerate(articles)
+    )
+    prompt = f"""아래는 최근 24시간 글로벌 금융 뉴스 목록입니다.
+한국 투자자가 오늘 아침 반드시 알아야 할 시장 영향이 큰 이슈 {n}건을 고르세요.
+
+규칙:
+- 서로 다른 이슈로 {n}건. 같은 사건을 다룬 기사는 1건만
+- 가능하면 서로 다른 매체에서 고를 것
+- 개별 기업 소식보다 금리, 물가, 통화정책, 환율, 원자재, 지정학 등 거시 이슈 우선
+- 각 이슈에 한국어 설명 한 문장 (60자 이내, 명사형 마무리)
+- 설명은 목록에 있는 제목과 요약 내용만 근거로 작성하고, 없는 수치나 사실을 추가하지 말 것
+
+JSON 배열만 출력: [{{"id": 번호, "summary": "한 줄 설명"}}]
+
+[뉴스 목록]
+{listing}"""
+
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    resp = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            max_output_tokens=4096, temperature=0.2, response_mime_type="application/json",
+        ),
+    )
+    picks = []
+    for p in json.loads(resp.text):
+        i = int(p["id"])
+        if 0 <= i < len(articles) and all(x["title"] != articles[i]["title"] for x in picks):
+            picks.append({**articles[i], "explain": str(p.get("summary", "")).strip()})
+    if not picks:
+        raise RuntimeError("Gemini 응답에 유효한 기사 없음")
+    return picks[:n]
+
+
+def _pick_fallback(articles: list[dict], n: int) -> list[dict]:
+    """매체별 최신 기사 1개씩 순서대로"""
+    picks, used = [], set()
+    for a in articles:
+        if a["source"] not in used:
+            picks.append({**a, "explain": ""})
+            used.add(a["source"])
+        if len(picks) >= n:
+            break
+    return picks
+
+
+def get_headlines(n: int = 3, hours: int = 24) -> list[dict]:
+    """[{source, title, summary, explain}], 텍스트는 escape 전 원문"""
+    articles = _collect_articles(hours)
+    if not articles:
         return []
+    try:
+        return _pick_with_gemini(articles, n)
+    except Exception as e:
+        print(f"[news] Gemini 선별 실패, 매체별 최신 기사로 대체: {e}")
+        return _pick_fallback(articles, n)
+
+
+def format_headlines(picks: list[dict]) -> list[str]:
+    """텔레그램 HTML 메시지용 줄"""
+    lines = []
+    for i, p in enumerate(picks, 1):
+        lines.append(f"{i}. {html.escape(p['title'], quote=False)} ({p['source']})")
+        if p["explain"]:
+            lines.append(f"   └ {html.escape(p['explain'], quote=False)}")
+    return lines
 
 
 # ── 주요 일정 ─────────────────────────────────────────────────────────────────
@@ -108,10 +216,12 @@ def _bea_events(start: datetime.date, end: datetime.date) -> list[tuple]:
         if not start <= date <= end:
             continue
         if summary.startswith("Personal Income and Outlays"):
-            events.append((date, "미국 PCE 물가", BEA))
+            events.append((date, "미국 PCE 물가", BEA, 3))
         elif summary.startswith("GDP"):
             stage = next((v for k, v in GDP_STAGES.items() if k in summary), "")
-            events.append((date, f"미국 GDP{f' ({stage})' if stage else ''}", BEA))
+            # 속보치는 시장 반응이 커서 한 단계 높게
+            events.append((date, f"미국 GDP{f' ({stage})' if stage else ''}", BEA,
+                           3 if stage == "속보치" else 2))
     return events
 
 
@@ -131,8 +241,8 @@ def _ism_events(start: datetime.date, end: datetime.date) -> list[tuple]:
     y, m = start.year, start.month
     while datetime.date(y, m, 1) <= end:
         bdays = _us_business_days(y, m)
-        events.append((bdays[0], "미국 ISM 제조업 PMI", "ISM"))
-        events.append((bdays[2], "미국 ISM 서비스업 PMI", "ISM"))
+        events.append((bdays[0], "미국 ISM 제조업 PMI", "ISM", 2))
+        events.append((bdays[2], "미국 ISM 서비스업 PMI", "ISM", 2))
         y, m = (y + 1, 1) if m == 12 else (y, m + 1)
     return [e for e in events if start <= e[0] <= end]
 
@@ -155,12 +265,13 @@ def _fomc_events(start: datetime.date, end: datetime.date) -> list[tuple]:
             date = datetime.date(int(year), last_month, int(last_day[-1]))
             if start <= date <= end:
                 name = "FOMC 금리 결정" + (" (점도표 발표)" if "*" in days else "")
-                events.append((date, name, "Federal Reserve"))
+                events.append((date, name, "Federal Reserve", 3))
     return events
 
 
 def get_upcoming_events(days: int = 14, limit: int = 6) -> list[str]:
-    """오늘(KST)부터 days일 이내 일정. 날짜는 미국 현지 발표일 기준"""
+    """오늘(KST)부터 days일 이내 일정, 날짜는 미국 현지 발표일 기준
+    limit을 넘으면 중요도 낮은 것부터 제외"""
     today = datetime.datetime.now(KST).date()
     end = today + datetime.timedelta(days=days)
 
@@ -179,9 +290,10 @@ def get_upcoming_events(days: int = 14, limit: int = 6) -> list[str]:
         except Exception as e:
             print(f"[calendar] {source.__name__} 실패: {e}")
 
-    events = sorted(set(events))[:limit]
+    events = set(events)
+    keep = sorted(events, key=lambda e: (-e[3], e[0]))[:limit]
     lines = []
-    for date, name, org in events:
-        tonight = " ← 오늘 밤" if date == today else ""
-        lines.append(f"- {date:%m/%d} {name} ({org}){tonight}")
+    for date, name, org, stars in sorted(keep, key=lambda e: (e[0], -e[3], e[1])):
+        tonight = " · 오늘 밤" if date == today else ""
+        lines.append(f"- {date:%m/%d} {name} ({org}) {'★' * stars}{'☆' * (3 - stars)}{tonight}")
     return lines
