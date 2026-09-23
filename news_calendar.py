@@ -3,7 +3,7 @@
 - 핵심 이슈: 로이터, 블룸버그, WSJ, FT, CNBC 최근 24시간 기사 중
              Gemini가 시장 영향이 큰 3건을 고르고 한 줄 설명 작성
              (Gemini 실패 시 매체별 최신 기사를 설명 없이 사용)
-- 주요 일정: 향후 2주 미국 주요 지표 발표 및 FOMC, 중요도 ★ 1~3개
+- 주요 일정: 향후 2주 미국 주요 지표 발표 및 FOMC, 중요도 ★ 1~5개
     FRED 발표 일정 (BLS, BEA, Census)  → FRED_API_KEY 필요
     BEA 공식 캘린더                   → FRED 실패 시 대체 (BLS는 자동 접속 차단)
     ISM PMI                          → 제조업 매월 첫 영업일, 서비스업 셋째 영업일
@@ -50,18 +50,26 @@ BLS = "U.S. Bureau of Labor Statistics"
 BEA = "U.S. Bureau of Economic Analysis"
 CENSUS = "U.S. Census Bureau"
 
-# 중요도: 3 = 시장 전체 방향을 바꾸는 지표, 2 = 주목할 지표, 1 = 참고
+# 중요도 1~5
+#   5 = 시장 방향을 바꾸는 이벤트 (FOMC, CPI, 고용보고서)
+#   4 = 연준이 직접 보는 지표 (PCE, GDP 속보치)
+#   3 = 경기 흐름 확인 (ISM 제조업, 소매판매, PPI)
+#   2 = 보조 지표 (ISM 서비스업, JOLTS, GDP 잠정치)
+#   1 = 참고 (GDP 확정치)
+MAX_STARS = 5
+
 # FRED release_name → (표시 이름, 발표 기관, 중요도)
 FRED_RELEASES = {
-    "Consumer Price Index": ("미국 CPI 소비자물가", BLS, 3),
-    "Employment Situation": ("미국 고용보고서 (비농업 고용·실업률)", BLS, 3),
-    "Personal Income and Outlays": ("미국 PCE 물가", BEA, 3),
-    "Gross Domestic Product": ("미국 GDP", BEA, 2),
-    "Producer Price Index": ("미국 PPI 생산자물가", BLS, 2),
-    "Advance Monthly Sales for Retail and Food Services": ("미국 소매판매", CENSUS, 2),
-    "Job Openings and Labor Turnover Survey": ("미국 JOLTS 구인건수", BLS, 1),
+    "Consumer Price Index": ("미국 CPI 소비자물가", BLS, 5),
+    "Employment Situation": ("미국 고용보고서 (비농업 고용·실업률)", BLS, 5),
+    "Personal Income and Outlays": ("미국 PCE 물가", BEA, 4),
+    "Gross Domestic Product": ("미국 GDP", BEA, 3),
+    "Producer Price Index": ("미국 PPI 생산자물가", BLS, 3),
+    "Advance Monthly Sales for Retail and Food Services": ("미국 소매판매", CENSUS, 3),
+    "Job Openings and Labor Turnover Survey": ("미국 JOLTS 구인건수", BLS, 2),
 }
-GDP_STAGES = {"Advance": "속보치", "Second": "잠정치", "Third": "확정치"}
+# BEA 캘린더의 GDP 차수 → (표시, 중요도)
+GDP_STAGES = {"Advance": ("속보치", 4), "Second": ("잠정치", 2), "Third": ("확정치", 1)}
 
 MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
@@ -216,12 +224,10 @@ def _bea_events(start: datetime.date, end: datetime.date) -> list[tuple]:
         if not start <= date <= end:
             continue
         if summary.startswith("Personal Income and Outlays"):
-            events.append((date, "미국 PCE 물가", BEA, 3))
+            events.append((date, "미국 PCE 물가", BEA, 4))
         elif summary.startswith("GDP"):
-            stage = next((v for k, v in GDP_STAGES.items() if k in summary), "")
-            # 속보치는 시장 반응이 커서 한 단계 높게
-            events.append((date, f"미국 GDP{f' ({stage})' if stage else ''}", BEA,
-                           3 if stage == "속보치" else 2))
+            stage, stars = next((v for k, v in GDP_STAGES.items() if k in summary), ("", 3))
+            events.append((date, f"미국 GDP{f' ({stage})' if stage else ''}", BEA, stars))
     return events
 
 
@@ -241,7 +247,7 @@ def _ism_events(start: datetime.date, end: datetime.date) -> list[tuple]:
     y, m = start.year, start.month
     while datetime.date(y, m, 1) <= end:
         bdays = _us_business_days(y, m)
-        events.append((bdays[0], "미국 ISM 제조업 PMI", "ISM", 2))
+        events.append((bdays[0], "미국 ISM 제조업 PMI", "ISM", 3))
         events.append((bdays[2], "미국 ISM 서비스업 PMI", "ISM", 2))
         y, m = (y + 1, 1) if m == 12 else (y, m + 1)
     return [e for e in events if start <= e[0] <= end]
@@ -265,7 +271,7 @@ def _fomc_events(start: datetime.date, end: datetime.date) -> list[tuple]:
             date = datetime.date(int(year), last_month, int(last_day[-1]))
             if start <= date <= end:
                 name = "FOMC 금리 결정" + (" (점도표 발표)" if "*" in days else "")
-                events.append((date, name, "Federal Reserve", 3))
+                events.append((date, name, "Federal Reserve", 5))
     return events
 
 
@@ -295,5 +301,5 @@ def get_upcoming_events(days: int = 14, limit: int = 6) -> list[str]:
     lines = []
     for date, name, org, stars in sorted(keep, key=lambda e: (e[0], -e[3], e[1])):
         tonight = " · 오늘 밤" if date == today else ""
-        lines.append(f"- {date:%m/%d} {name} ({org}) {'★' * stars}{'☆' * (3 - stars)}{tonight}")
+        lines.append(f"- {date:%m/%d} {name} ({org}) {'★' * stars}{'☆' * (MAX_STARS - stars)}{tonight}")
     return lines
