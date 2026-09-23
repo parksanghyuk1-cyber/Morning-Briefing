@@ -6,10 +6,14 @@ dashboard.py v7
 - Gemini 2.5 Flash: 시장 코멘트
 - 매일 오전 7시 KST 텔레그램 전송 (주말, 공휴일 제외)
 """
-import os, re, json, datetime, requests
+import os, re, json, html, datetime, requests
 import yfinance as yf
 
 from kr_calendar import holiday_name, kst_today
+from news_calendar import get_headlines, get_upcoming_events
+
+# 수동 실행 테스트용, 휴일에도 발송
+FORCE_SEND = os.environ.get("FORCE_SEND", "").lower() in ("1", "true", "yes")
 
 try:
     from google import genai
@@ -218,7 +222,8 @@ def detect_anomalies(records: list[dict]) -> list[str]:
 
 # ── Gemini ────────────────────────────────────────────────────────────────────
 
-def get_ai_commentary(market_data: str, anomalies: list[str]) -> str:
+def get_ai_commentary(market_data: str, anomalies: list[str],
+                      headlines: list[str] = (), events: list[str] = ()) -> str:
     if not os.environ.get("GEMINI_API_KEY"):
         return "⚠️ GEMINI_API_KEY 미설정"
     if not GENAI_AVAILABLE:
@@ -228,6 +233,13 @@ def get_ai_commentary(market_data: str, anomalies: list[str]) -> str:
         "\n[오늘의 특이 급등락 항목]\n" + "\n".join(f"- {a}" for a in anomalies)
         if anomalies else ""
     )
+    news_section = (
+        "\n[주요 뉴스 헤드라인]\n" + "\n".join(f"- {html.unescape(h)}" for h in headlines)
+        if headlines else ""
+    )
+    events_section = (
+        "\n[향후 주요 일정]\n" + "\n".join(events) if events else ""
+    )
 
     prompt = f"""당신은 한국 기관투자자를 위한 시장 전략가입니다.
 아래 지표와 특이사항을 바탕으로 오늘 시장 브리핑을 작성하세요.
@@ -235,6 +247,8 @@ def get_ai_commentary(market_data: str, anomalies: list[str]) -> str:
 [지표 데이터]
 {market_data}
 {anomaly_section}
+{news_section}
+{events_section}
 
 아래 4개 섹션을 순서대로 작성하세요. 각 섹션 사이에 빈 줄 하나.
 각 섹션은 반드시 2문장 이내로 간결하게 작성.
@@ -292,6 +306,16 @@ def build_dashboard() -> str:
 
     L.append(b("🌍 글로벌 매크로 대시보드"))
     L.append(f"🕒 기준 시각: {time_str} (KST)")
+
+    headlines = get_headlines()
+    if headlines:
+        L.append(""); L.append(b("📰 오늘의 핵심 이슈"))
+        L.extend(f"{i}. {h} (CNBC)" for i, h in enumerate(headlines, 1))
+
+    events = get_upcoming_events()
+    if events:
+        L.append(""); L.append(b("🗓️ 주요 일정 (미국 현지 발표일)"))
+        L.extend(events)
 
     L.append(""); L.append(b("🔑 핵심 지표 (금리/달러)"))
     for ticker, label in [("^IRX", "🇺🇸 미국채 3개월"),("^TNX", "🇺🇸 미국채 10년"), ("^TYX", "🇺🇸 미국채 30년")]:
@@ -355,7 +379,7 @@ def build_dashboard() -> str:
         L.extend(f"• {a}" for a in anomalies)
 
     print("  → Gemini 코멘트 생성 중...")
-    commentary = get_ai_commentary("\n".join(SL), anomalies)
+    commentary = get_ai_commentary("\n".join(SL), anomalies, headlines, events)
 
     ai_lines = [b("🤖 AI 시장 브리핑"), ""]
     for line in commentary.split("\n"):
@@ -405,7 +429,7 @@ def send_telegram(text: str):
 def main():
     today = kst_today()
     off = holiday_name(today)
-    if off:
+    if off and not FORCE_SEND:
         print(f"{today} {off}이라 전송 생략")
         return
 

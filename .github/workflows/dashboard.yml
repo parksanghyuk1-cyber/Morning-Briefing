@@ -6,6 +6,11 @@ on:
     - cron: '0 22 * * 0-4'
   # 수동 트리거 (테스트용)
   workflow_dispatch:
+    inputs:
+      force:
+        description: '주말·공휴일에도 발송'
+        type: boolean
+        default: false
 
 jobs:
   send-dashboard:
@@ -32,6 +37,8 @@ jobs:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY:   ${{ secrets.GEMINI_API_KEY }}
+          FRED_API_KEY:     ${{ secrets.FRED_API_KEY }}
+          FORCE_SEND:       ${{ inputs.force }}
         run: python dashboard.py
 
       - name: 실패 알림
