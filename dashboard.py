@@ -415,7 +415,9 @@ def send_telegram(text: str):
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     for chunk in split_chunks(text):
-        payload = {"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"}
+        # 기사 링크가 들어가도 미리보기 카드는 띄우지 않음
+        payload = {"chat_id": chat_id, "text": chunk, "parse_mode": "HTML",
+                   "link_preview_options": {"is_disabled": True}}
         try:
             resp = requests.post(url, json=payload, timeout=15)
             if not resp.ok:
