@@ -382,6 +382,13 @@ def build_dashboard() -> str:
     print("  → Gemini 코멘트 생성 중...")
     commentary = get_ai_commentary("\n".join(SL), anomalies, headlines, events)
 
+    # 노션 대시보드용으로도 저장 (실패해도 텔레그램 전송은 계속)
+    try:
+        from notion_market import push_market
+        push_market(records, commentary)
+    except Exception as e:
+        print(f"[notion] 저장 실패: {e}")
+
     ai_lines = [b("🤖 AI 시장 브리핑"), ""]
     for line in commentary.split("\n"):
         stripped = line.strip()
