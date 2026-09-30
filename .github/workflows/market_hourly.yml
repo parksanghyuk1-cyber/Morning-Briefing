@@ -1,0 +1,32 @@
+name: 시장 지표 (노션 1시간마다)
+
+on:
+  # 매시 47분 — 매크로 모니터(17분)와 겹치지 않게, 정각 대기열도 피함
+  schedule:
+    - cron: '47 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: market-hourly
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      # 실패해도 텔레그램 알림은 보내지 않음 (1시간마다라 시끄러움) — 다음 시각에 다시 시도됨
+      - name: 지표 받아서 노션에 저장
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+        run: python market_hourly.py
