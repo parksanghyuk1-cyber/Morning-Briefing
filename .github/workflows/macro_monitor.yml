@@ -1,0 +1,27 @@
+name: 매크로 모니터 (노션 1시간마다)
+
+on:
+  # 매시 17분 (정각은 GitHub 대기열이 붐벼서 피함)
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: macro-monitor
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 지표 받아서 노션에 저장
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+        run: python macro_monitor.py
