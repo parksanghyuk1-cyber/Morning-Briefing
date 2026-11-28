@@ -398,7 +398,7 @@ def chart(data, path):
 
 # ── 텔레그램 ─────────────────────────
 def caption(data):
-    d = kst_today()
+    d = date.fromisoformat(data["fg"][0]["asOf"])  # 실제 마지막 거래일
     lines = [f"<b>📊 시장 심리</b> ({d.month}/{d.day} 국장 마감)", ""]
     for f in data["fg"]:
         arrow = " → ".join(f"{v:.0f}" for _, v in f["hist"])
