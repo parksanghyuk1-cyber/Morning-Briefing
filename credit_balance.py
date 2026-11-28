@@ -109,7 +109,16 @@ def download_excel() -> None:
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 1400, "height": 1200})
-        page.goto(URL, wait_until="networkidle", timeout=30000)
+        # FreeSIS가 가끔 느려서 30초 안에 안 열림 → 60초씩 최대 3번 시도
+        for attempt in range(3):
+            try:
+                page.goto(URL, wait_until="networkidle", timeout=60000)
+                break
+            except Exception as e:
+                print(f"[FreeSIS 접속 {attempt + 1}회 실패] {e}")
+                if attempt == 2:
+                    raise
+                page.wait_for_timeout(15000)
         page.wait_for_timeout(3000)  # 데이터 로딩 대기
 
         set_period_6months(page)
