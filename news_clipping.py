@@ -279,7 +279,8 @@ def render(items, cutoff):
         if it.get("link", "").startswith("http"):
             t = f'<a href="{html.escape(it["link"])}">{t}</a>'
         mark = "★" if it.get("star") else "  "
-        body = " / ".join(html.escape(s, quote=False) for s in it["lines"])
+        # 예시 형식처럼 문장 끝 마침표 없이 "/"로 잇는다
+        body = "/".join(html.escape(s.strip().rstrip("."), quote=False) for s in it["lines"])
         blocks.append(f'{mark} "{t}"\n-{body}')
     return head, blocks
 
