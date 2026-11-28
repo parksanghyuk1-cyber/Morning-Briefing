@@ -1,8 +1,8 @@
 name: Credit Balance Chart
 
 on:
-  schedule:
-    - cron: '30 7 * * 1-5'   # 평일 오후 4시 30분 KST
+  # 실행: cron-job.org가 평일 16:30 KST에 workflow_dispatch 호출
+  # (GitHub schedule은 몇 시간씩 늦게 돌아서 2026-11-28에 뺌)
   workflow_dispatch:
     inputs:
       force:

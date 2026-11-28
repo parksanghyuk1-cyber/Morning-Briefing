@@ -1,8 +1,8 @@
 name: investor_flow
 
 on:
-  schedule:
-    - cron: "0 10 * * 1-5"   # UTC 10:00 = KST 19:00, 평일
+  # 실행: cron-job.org가 평일 19:00 KST에 workflow_dispatch 호출
+  # (GitHub schedule은 몇 시간씩 늦게 돌아서 2026-11-28에 뺌)
   workflow_dispatch:
 
 permissions:

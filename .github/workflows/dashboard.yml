@@ -1,10 +1,8 @@
 name: 글로벌 매크로 대시보드
 
 on:
-  # 매일 KST 07:00 (UTC 22:00 전날) 자동 실행
-  schedule:
-    - cron: '0 22 * * 0-4'
-  # 수동 트리거 (테스트용)
+  # 실행: cron-job.org가 평일 07:00 KST에 workflow_dispatch 호출
+  # (GitHub schedule은 몇 시간씩 늦게 돌아서 2026-11-28에 뺌)
   workflow_dispatch:
     inputs:
       force:
