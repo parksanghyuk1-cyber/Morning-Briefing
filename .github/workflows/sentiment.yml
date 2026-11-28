@@ -1,0 +1,58 @@
+name: 시장 심리
+
+on:
+  # 실행: cron-job.org가 평일 15:45 KST에 workflow_dispatch 호출
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '주말·공휴일에도 발송'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sentiment
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 한글 폰트 설치
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-nanum
+          sudo fc-cache -fv > /dev/null
+          rm -rf ~/.cache/matplotlib
+
+      - name: 패키지 설치
+        run: pip install --quiet pykrx pandas matplotlib requests holidays
+
+      - name: 계산 · 노션 저장 · 텔레그램 발송
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          KRX_ID: ${{ secrets.KRX_ID }}
+          KRX_PW: ${{ secrets.KRX_PW }}
+          FORCE_SEND: ${{ inputs.force }}
+          TZ: Asia/Seoul
+        run: python sentiment.py
+
+      - name: 등락 종목 수 저장
+        if: always()
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add data/breadth.csv 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "data: breadth $(date +%Y-%m-%d)"
+          git pull --rebase -q && git push
