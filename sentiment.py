@@ -1,5 +1,5 @@
 """
-시장 심리 한눈에 (sentiment.yml, cron-job.org가 평일 15:45 KST에 실행)
+시장 심리 한눈에 (sentiment.yml, cron-job.org가 평일 07:10 장 전 · 15:45 마감 뒤 KST에 실행)
 - 공포·탐욕 지수 2개 (미국 S&P 500 / KOSPI 200), CNN과 같은 방식으로 자체 계산
 - RSI(14) 코스피·코스닥, ADR(20일 등락비율) 코스피·코스닥, VIX, VKOSPI
 - 기준선을 넘거나 크게 움직인 지표만 골라 코멘트 2~3줄
@@ -33,6 +33,8 @@ TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 FORCE_SEND = os.environ.get("FORCE_SEND", "").lower() in ("1", "true", "yes")
 DRY_RUN = "--dry-run" in sys.argv  # 노션·텔레그램 없이 계산과 차트만
+# close: 국장 마감 뒤(15:45) / morning: 장 시작 전(07:10, 밤사이 미국장 반영, 국장 지표는 전날 마감 값)
+SESSION = os.environ.get("SESSION", "close").strip().lower() or "close"
 
 UA = {"User-Agent": "Mozilla/5.0"}
 
@@ -170,7 +172,7 @@ def band(v):
 BAND_KO = {"Extreme Fear": "극단적 공포", "Fear": "공포", "Neutral": "중립",
            "Greed": "탐욕", "Extreme Greed": "극단적 탐욕"}
 
-STEPS = [("1달 전", 21), ("1주 전", 5), ("어제", 1), ("오늘", 0)]
+STEPS = [("1달 전", 21), ("1주 전", 5), ("전날", 1), ("최근", 0)]
 
 
 def history(pts):
@@ -311,8 +313,8 @@ def build():
 
     days = [d for d, _ in ks200][-30:]
     today = kst_today().isoformat()
-    if today not in days and not holiday_name(kst_today()):
-        days.append(today)
+    if SESSION == "close" and today not in days and not holiday_name(kst_today()):
+        days.append(today)  # 아침에는 오늘 시세가 아직 없으니 넣지 않는다
     rows = update_breadth(days)
     adrs = {"코스피": None, "코스닥": None}
     adr_asof = None
@@ -334,6 +336,7 @@ def build():
 
     return {
         "generatedAt": datetime.now(KST).replace(microsecond=0).isoformat(),
+        "session": SESSION,
         "fg": fg,
         "rsi": {k: round(v, 2) for k, v in rsis.items()},
         "rsiAsOf": kospi[-1][0],
@@ -398,12 +401,18 @@ def chart(data, path):
 
 # ── 텔레그램 ─────────────────────────
 def caption(data):
-    d = date.fromisoformat(data["fg"][0]["asOf"])  # 실제 마지막 거래일
-    lines = [f"<b>📊 시장 심리</b> ({d.month}/{d.day} 국장 마감)", ""]
+    md = lambda s: f"{int(s[5:7])}/{int(s[8:10])}"
+    kr_d = data["fg"][0]["asOf"]  # 실제 마지막 거래일
+    us_d = data["fg"][1]["asOf"]
+    if data.get("session") == "morning":
+        head = f"장 시작 전 · 국장 {md(kr_d)} / 미국장 {md(us_d)} 마감 기준"
+    else:
+        head = f"{md(kr_d)} 국장 마감"
+    lines = [f"<b>📊 시장 심리</b> ({head})", ""]
     for f in data["fg"]:
         arrow = " → ".join(f"{v:.0f}" for _, v in f["hist"])
         lines.append(f"<b>{html.escape(f['name'])}:</b> {arrow}, {f['band']}")
-    lines.append("<i>(1달 전 → 1주 전 → 어제 → 오늘 · 자체 계산)</i>")
+    lines.append("<i>(1달 전 → 1주 전 → 전날 → 최근 마감 · 자체 계산)</i>")
     lines.append("")
     r = data["rsi"]
     lines.append(f"<b>RSI:</b> 코스피 {r['코스피']:.2f} / 코스닥 {r['코스닥']:.2f}")

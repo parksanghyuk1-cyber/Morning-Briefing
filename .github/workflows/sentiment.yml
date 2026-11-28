@@ -1,9 +1,14 @@
 name: 시장 심리
 
 on:
-  # 실행: cron-job.org가 평일 15:45 KST에 workflow_dispatch 호출
+  # 실행: cron-job.org가 평일 07:10(session=morning) · 15:45(session=close) KST에 workflow_dispatch 호출
   workflow_dispatch:
     inputs:
+      session:
+        description: 'close = 국장 마감 뒤, morning = 장 시작 전'
+        type: choice
+        options: [close, morning]
+        default: close
       force:
         description: '주말·공휴일에도 발송'
         type: boolean
@@ -45,6 +50,7 @@ jobs:
           KRX_ID: ${{ secrets.KRX_ID }}
           KRX_PW: ${{ secrets.KRX_PW }}
           FORCE_SEND: ${{ inputs.force }}
+          SESSION: ${{ inputs.session || 'close' }}
           TZ: Asia/Seoul
         run: python sentiment.py
 
