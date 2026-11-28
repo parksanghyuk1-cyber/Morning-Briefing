@@ -112,7 +112,12 @@ def download_excel() -> None:
         # FreeSIS가 가끔 느려서 30초 안에 안 열림 → 60초씩 최대 3번 시도
         for attempt in range(3):
             try:
-                page.goto(URL, wait_until="networkidle", timeout=60000)
+                # networkidle은 사이트가 통신을 계속하면 영영 안 끝날 수 있어 뼈대만 뜨면 진행
+                page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    pass
                 break
             except Exception as e:
                 print(f"[FreeSIS 접속 {attempt + 1}회 실패] {e}")
