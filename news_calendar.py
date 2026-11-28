@@ -141,11 +141,14 @@ JSON 배열만 출력: [{{"id": 번호, "summary": "한 줄 설명"}}]
         model="gemini-2.5-flash",
         contents=prompt,
         config=types.GenerateContentConfig(
-            max_output_tokens=4096, temperature=0.2, response_mime_type="application/json",
+            max_output_tokens=4096, temperature=0.2,  # JSON 응답 모드는 현재 API 버전에서 막혀 있음
         ),
     )
+    m = re.search(r"\[.*\]", resp.text or "", re.S)
+    if not m:
+        raise RuntimeError("Gemini 응답에 JSON 배열 없음")
     picks = []
-    for p in json.loads(resp.text):
+    for p in json.loads(m.group(0)):
         i = int(p["id"])
         if 0 <= i < len(articles) and all(x["title"] != articles[i]["title"] for x in picks):
             picks.append({**articles[i], "explain": str(p.get("summary", "")).strip()})

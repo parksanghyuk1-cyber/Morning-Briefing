@@ -186,13 +186,16 @@ def gemini_json(prompt):
     from google.genai import types
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])  # 변수로 잡아둬야 도중에 닫히지 않음
     last = None
-    for model in ("gemini-2.5-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"):
+    # JSON 응답 모드(response_mime_type)는 현재 API 버전에서 막혀 있어 글로 받아서 JSON만 뽑는다
+    for model in ("gemini-2.5-flash", "gemini-2.5-flash", "gemini-3.5-flash-lite"):
         try:
             resp = client.models.generate_content(
                 model=model, contents=prompt,
-                config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=8192,
-                                                   response_mime_type="application/json"))
-            return json.loads(resp.text)
+                config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=8192))
+            m = re.search(r"\[.*\]", resp.text or "", re.S)
+            if not m:
+                raise ValueError(f"JSON 배열 없음: {(resp.text or '')[:120]!r}")
+            return json.loads(m.group(0))
         except Exception as e:
             last = e
             print(f"[gemini] {model} 실패: {e}")
@@ -247,6 +250,24 @@ JSON 배열만 출력: [{"id": 번호, "lines": ["문장1", "문장2", ...]}]
     return picks
 
 
+# AI 없이도 빼야 할 기사 (부고·인사·사진·스포츠·연예 등)
+JUNK = re.compile(r"\[(부고|인사|포토|사진|게시판|날씨|오늘의 운세|모멘트|영상)\]|별세|모친상|부친상|빙부상|빙모상|결혼|"
+                  r"축구|야구|농구|배구|골프|챔스|리그|감독|이강인|손흥민|드라마|아이돌|배우|가수")
+FALLBACK_SOURCES = ("한국경제", "매일경제", "이데일리", "서울경제", "연합뉴스")  # 증권·산업면 위주 피드 순서
+
+
+def fallback(domestic):
+    """AI 실패 시: 증권·산업 피드에서 돌아가며 최신 기사 8건"""
+    by_src = {s: [a for a in domestic if a["source"] == s] for s in FALLBACK_SOURCES}
+    picks = []
+    while len(picks) < N_DOMESTIC and any(by_src.values()):
+        for s in FALLBACK_SOURCES:
+            if by_src[s] and len(picks) < N_DOMESTIC:
+                a = by_src[s].pop(0)
+                picks.append({**a, "star": False, "lines": [a["desc"][:120]] if a["desc"] else []})
+    return picks
+
+
 # ── 텔레그램 ─────────────────────────
 def render(items, cutoff):
     d = kst_today()
@@ -298,17 +319,22 @@ def main():
     cutoff = since_cutoff()
     articles = collect(cutoff)
     print(f"기사 {len(articles)}건 수집 ({cutoff:%m/%d %H:%M} 이후)")
-    domestic = [a for a in articles if not re.search(r"\[(뉴욕증시|뉴욕유가|美증시|유럽증시)", a["title"])]
+    domestic = [a for a in articles
+                if not re.search(r"\[(뉴욕증시|뉴욕유가|美증시|유럽증시)", a["title"]) and not JUNK.search(a["title"])]
+    ai_ok = True
     try:
         picks = pick(domestic)
         for p in picks:
             p["body"] = article_text(p["link"])
         picks = summarize(picks)
     except Exception as e:
-        print(f"AI 선별·요약 실패, 최신 기사 제목으로 대체: {e}")
-        picks = [{**a, "star": False, "lines": [a["desc"][:120]] if a["desc"] else []} for a in domestic[:N_DOMESTIC]]
+        print(f"AI 선별·요약 실패, 증권·산업 기사 제목으로 대체: {e}")
+        ai_ok = False
+        picks = fallback(domestic)
     items = us_items() + picks
     head, blocks = render(items, cutoff)
+    if not ai_ok:
+        head += "\n<i>(AI 요약이 안 돼서 오늘은 증권·산업 기사 제목만 보내요)</i>"
     print(head + "\n\n" + "\n\n".join(blocks))
     if DRY_RUN:
         return
