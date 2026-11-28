@@ -4,6 +4,11 @@ on:
   # 실행: cron-job.org가 평일 19:00 KST에 workflow_dispatch 호출
   # (GitHub schedule은 몇 시간씩 늦게 돌아서 2026-11-28에 뺌)
   workflow_dispatch:
+    inputs:
+      force:
+        description: '새 거래일이 없어도 발송 (시험용)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -35,6 +40,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           KRX_ID: ${{ secrets.KRX_ID }}
           KRX_PW: ${{ secrets.KRX_PW }}
+          FORCE_SEND: ${{ inputs.force }}
           TZ: Asia/Seoul
         run: python investor_flow.py
 
